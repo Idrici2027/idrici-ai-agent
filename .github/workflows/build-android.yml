@@ -1,3 +1,4 @@
+
 name: Build Idrici AI Android APK
 
 on:
@@ -31,6 +32,26 @@ jobs:
           cp android_app/pubspec.yaml build_app/pubspec.yaml
           mkdir -p build_app/lib
           cp android_app/lib/main.dart build_app/lib/main.dart
+
+      - name: Add Android Internet permission
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          manifest = Path(
+              "build_app/android/app/src/main/AndroidManifest.xml"
+          )
+          content = manifest.read_text()
+          permission = '    <uses-permission android:name="android.permission.INTERNET"/>'
+
+          if "android.permission.INTERNET" not in content:
+              content = content.replace(
+                  "<application",
+                  permission + "\n    <application",
+                  1,
+              )
+              manifest.write_text(content)
+          PY
 
       - name: Get Flutter dependencies
         working-directory: build_app
