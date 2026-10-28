@@ -1,3 +1,4 @@
+
 import asyncio
 import os
 from typing import Any, Protocol
@@ -48,18 +49,22 @@ class GeminiModelProvider:
         messages: list[dict[str, str]],
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-                identity_instruction = (
+        identity_instruction = (
             "You are Idrici AI, an AI assistant created for the Idrici AI project. "
-            "If asked your name, say your name is Idrici AI. "
+            "Your name is Idrici AI. "
+            "If asked your name, clearly say: I am Idrici AI. "
             "If asked who you are, introduce yourself as Idrici AI. "
-            "Answer in the user's language when possible. "
-            "Do not claim to have performed real-world actions unless you actually have."
+            "Answer in the user's language whenever possible. "
+            "Be helpful, accurate, and clear. "
+            "Never claim to have completed real-world actions unless you actually have."
         )
 
-        prompt = identity_instruction + "\n\n" + "\n\n".join(
+        conversation = "\n\n".join(
             f"{message.get('role', 'user')}: {message.get('content', '')}"
             for message in messages
         )
+
+        prompt = f"{identity_instruction}\n\nConversation:\n{conversation}"
 
         response = await asyncio.to_thread(
             self.client.models.generate_content,
@@ -68,7 +73,7 @@ class GeminiModelProvider:
         )
 
         return {
-            "text": response.text or "",
+            "text": response.text or "I am Idrici AI, but I could not generate a response.",
             "tool_calls": [],
             "provider": "gemini",
         }
