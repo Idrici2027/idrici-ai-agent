@@ -48,7 +48,15 @@ class GeminiModelProvider:
         messages: list[dict[str, str]],
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        prompt = "\n\n".join(
+                identity_instruction = (
+            "You are Idrici AI, an AI assistant created for the Idrici AI project. "
+            "If asked your name, say your name is Idrici AI. "
+            "If asked who you are, introduce yourself as Idrici AI. "
+            "Answer in the user's language when possible. "
+            "Do not claim to have performed real-world actions unless you actually have."
+        )
+
+        prompt = identity_instruction + "\n\n" + "\n\n".join(
             f"{message.get('role', 'user')}: {message.get('content', '')}"
             for message in messages
         )
