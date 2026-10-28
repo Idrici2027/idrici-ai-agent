@@ -11,7 +11,7 @@ provider_path = (
     Path(__file__).parent
     / "app"
     / "Models"
-    / "model.provider.py"
+    / "model_provider.py"
 )
 
 spec = importlib.util.spec_from_file_location(
