@@ -10,7 +10,7 @@ app = FastAPI(title="Idrici AI API")
 provider_path = (
     Path(__file__).parent
     / "app"
-    / "Models"
+    / "models"
     / "model_provider.py"
 )
 
