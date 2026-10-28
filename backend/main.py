@@ -47,17 +47,25 @@ async def chat(request: ChatRequest):
 
     try:
         provider = GeminiModelProvider()
+
         result = await provider.generate(
             messages=[
                 {"role": "user", "content": request.message}
             ]
         )
+
         return {
             "reply": result["text"],
             "provider": result["provider"],
         }
-    except Exception:
+
+    except Exception as exc:
+        print(
+            f"AI REQUEST ERROR: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+
         raise HTTPException(
             status_code=500,
-            detail="AI request failed. Check server configuration.",
-        )
+            detail="AI request failed. Check server logs.",
+        ) from None
