@@ -1,4 +1,7 @@
+
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 void main() {
   runApp(const IdriciApp());
@@ -34,28 +37,106 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  static const String _apiUrl =
+      'https://idrici-ai-agent.onrender.com/chat';
+
   final TextEditingController _controller = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
   final List<Map<String, String>> _messages = [];
+
   bool _showWelcome = true;
+  bool _isLoading = false;
 
   @override
   void dispose() {
     _controller.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
-  void _sendMessage() {
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  Future<void> _sendMessage() async {
     final text = _controller.text.trim();
-    if (text.isEmpty) return;
+
+    if (text.isEmpty || _isLoading) return;
 
     setState(() {
       _showWelcome = false;
+      _isLoading = true;
       _messages.add({'role': 'user', 'text': text});
-      _messages.add({
-        'role': 'assistant',
-        'text': 'وصل طلبك إلى واجهة Idrici AI. ربط محرك الذكاء الاصطناعي سيأتي في المرحلة التالية.',
+    });
+
+    _controller.clear();
+    _scrollToBottom();
+
+    try {
+      final response = await http
+          .post(
+            Uri.parse(_apiUrl),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'message': text}),
+          )
+          .timeout(const Duration(seconds: 90));
+
+      if (response.statusCode >= 200 &&
+          response.statusCode < 300) {
+        final data = jsonDecode(response.body);
+        final reply = data['reply']?.toString();
+
+        if (reply == null || reply.isEmpty) {
+          throw Exception('لم يصل رد من الخادم.');
+        }
+
+        if (!mounted) return;
+        setState(() {
+          _messages.add({
+            'role': 'assistant',
+            'text': reply,
+          });
+        });
+      } else {
+        String detail = 'HTTP ${response.statusCode}';
+        try {
+          final data = jsonDecode(response.body);
+          detail = data['detail']?.toString() ?? detail;
+        } catch (_) {}
+
+        throw Exception(detail);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _messages.add({
+          'role': 'assistant',
+          'text': 'تعذر الحصول على رد من الذكاء الاصطناعي.\n'
+              'التفاصيل: ${e.toString().replaceFirst('Exception: ', '')}\n'
+              'تحقق من اتصال الإنترنت وإعدادات الخادم.',
+        });
       });
-      _controller.clear();
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+        _scrollToBottom();
+      }
+    }
+  }
+
+  void _newConversation() {
+    if (_isLoading) return;
+    setState(() {
+      _messages.clear();
+      _showWelcome = true;
     });
   }
 
@@ -68,16 +149,16 @@ class _ChatScreenState extends State<ChatScreen> {
           children: [
             Icon(Icons.auto_awesome, color: Color(0xFF54D6B0)),
             SizedBox(width: 10),
-            Text('Idrici AI', style: TextStyle(fontWeight: FontWeight.bold)),
+            Text(
+              'Idrici AI',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
           ],
         ),
         actions: [
           IconButton(
             tooltip: 'New conversation',
-            onPressed: () => setState(() {
-              _messages.clear();
-              _showWelcome = true;
-            }),
+            onPressed: _newConversation,
             icon: const Icon(Icons.add_comment_outlined),
           ),
         ],
@@ -129,11 +210,36 @@ class _ChatScreenState extends State<ChatScreen> {
                       ),
                     )
                   : ListView.builder(
+                      controller: _scrollController,
                       padding: const EdgeInsets.all(16),
-                      itemCount: _messages.length,
+                      itemCount: _messages.length + (_isLoading ? 1 : 0),
                       itemBuilder: (context, index) {
+                        if (_isLoading && index == _messages.length) {
+                          return const Align(
+                            alignment: Alignment.centerLeft,
+                            child: Padding(
+                              padding: EdgeInsets.all(14),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  ),
+                                  SizedBox(width: 12),
+                                  Text('Idrici AI يفكر...'),
+                                ],
+                              ),
+                            ),
+                          );
+                        }
+
                         final message = _messages[index];
                         final isUser = message['role'] == 'user';
+
                         return Align(
                           alignment: isUser
                               ? Alignment.centerRight
@@ -148,9 +254,12 @@ class _ChatScreenState extends State<ChatScreen> {
                                   : const Color(0xFF202632),
                               borderRadius: BorderRadius.circular(18),
                             ),
-                            child: Text(
+                            child: SelectableText(
                               message['text']!,
-                              style: const TextStyle(fontSize: 15, height: 1.5),
+                              style: const TextStyle(
+                                fontSize: 15,
+                                height: 1.5,
+                              ),
                             ),
                           ),
                         );
@@ -191,7 +300,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                   const SizedBox(width: 8),
                   IconButton.filled(
-                    onPressed: _sendMessage,
+                    onPressed: _isLoading ? null : _sendMessage,
                     style: IconButton.styleFrom(
                       backgroundColor: const Color(0xFF54D6B0),
                       foregroundColor: const Color(0xFF10131A),
