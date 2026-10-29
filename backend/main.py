@@ -25,7 +25,7 @@ if spec is None or spec.loader is None:
 provider_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(provider_module)
 
-GeminiModelProvider = provider_module.GeminiModelProvider
+GroqModelProvider = provider_module.GroqModelProvider
 
 
 class ChatRequest(BaseModel):
@@ -34,7 +34,10 @@ class ChatRequest(BaseModel):
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "app": "Idrici AI"}
+    return {
+        "status": "ok",
+        "app": "Idrici AI",
+    }
 
 
 @app.post("/chat")
@@ -46,11 +49,14 @@ async def chat(request: ChatRequest):
         )
 
     try:
-        provider = GeminiModelProvider()
+        provider = GroqModelProvider()
 
         result = await provider.generate(
             messages=[
-                {"role": "user", "content": request.message}
+                {
+                    "role": "user",
+                    "content": request.message,
+                }
             ]
         )
 
