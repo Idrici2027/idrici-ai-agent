@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 from typing import Any, Protocol
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from google import genai
@@ -92,8 +93,18 @@ class GroqModelProvider:
         )
 
         def send_request() -> dict[str, Any]:
-            with urlopen(request, timeout=60) as response:
-                return json.loads(response.read().decode("utf-8"))
+            try:
+                with urlopen(request, timeout=60) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                print(
+                    f"Groq API error: HTTP {exc.code}: {error_body[:2000]}",
+                    flush=True,
+                )
+                raise RuntimeError(
+                    f"Groq API returned HTTP {exc.code}: {error_body[:2000]}"
+                ) from exc
 
         response_data = await asyncio.to_thread(send_request)
         choices = response_data.get("choices", [])
