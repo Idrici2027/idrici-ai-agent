@@ -1,7 +1,9 @@
 
 import asyncio
+import json
 import os
 from typing import Any, Protocol
+from urllib.request import Request, urlopen
 
 from google import genai
 
@@ -33,8 +35,83 @@ class MockModelProvider:
         }
 
 
+class GroqModelProvider:
+    """Groq chat-completions provider."""
+
+    def __init__(self) -> None:
+        self.api_key = os.getenv("GROQ_API_KEY")
+        if not self.api_key:
+            raise RuntimeError("GROQ_API_KEY is not configured")
+
+        self.model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+        self.api_url = "https://api.groq.com/openai/v1/chat/completions"
+
+    async def generate(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        identity_instruction = (
+            "You are Idrici AI, an AI assistant created for the Idrici AI project. "
+            "Your name is Idrici AI. "
+            "If asked your name, clearly say: I am Idrici AI. "
+            "If asked who you are, introduce yourself as Idrici AI. "
+            "Answer in the user's language whenever possible. "
+            "Be helpful, accurate, and clear. "
+            "Never claim to have completed real-world actions unless you actually have."
+        )
+
+        api_messages = [
+            {"role": "system", "content": identity_instruction}
+        ]
+
+        for message in messages:
+            role = message.get("role", "user")
+            if role not in {"system", "user", "assistant"}:
+                role = "user"
+
+            api_messages.append({
+                "role": role,
+                "content": message.get("content", ""),
+            })
+
+        payload = json.dumps({
+            "model": self.model,
+            "messages": api_messages,
+            "temperature": 0.7,
+        }).encode("utf-8")
+
+        request = Request(
+            self.api_url,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        def send_request() -> dict[str, Any]:
+            with urlopen(request, timeout=60) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        response_data = await asyncio.to_thread(send_request)
+        choices = response_data.get("choices", [])
+
+        if not choices:
+            raise RuntimeError("Groq returned no response choices")
+
+        reply = choices[0].get("message", {}).get("content", "")
+
+        return {
+            "text": reply or "I am Idrici AI, but I could not generate a response.",
+            "tool_calls": [],
+            "provider": "groq",
+        }
+
+
 class GeminiModelProvider:
-    """Google Gemini model provider."""
+    """Google Gemini model provider retained as an alternative."""
 
     def __init__(self) -> None:
         api_key = os.getenv("GEMINI_API_KEY")
