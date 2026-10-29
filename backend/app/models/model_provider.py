@@ -1,4 +1,4 @@
-
+ 
 import asyncio
 import json
 import os
@@ -88,6 +88,7 @@ class GroqModelProvider:
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
+                "User-Agent": "IdriciAI/1.0",
             },
             method="POST",
         )
