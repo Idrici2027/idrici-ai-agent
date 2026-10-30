@@ -3,6 +3,11 @@ name: Generate Android Native Scaffold
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/electric-humanoid-ui
+    paths:
+      - '.github/workflows/generate-android-scaffold.yml'
 
 permissions:
   contents: write
