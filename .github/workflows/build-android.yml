@@ -20,8 +20,31 @@ jobs:
         with:
           channel: stable
 
+      - name: Inspect build environment
+        run: |
+          echo "===== Flutter ====="
+          flutter --version
+
+          echo "===== Dart ====="
+          dart --version
+
+          echo "===== Java ====="
+          java -version
+
       - name: Create Android project structure
         run: flutter create --platforms=android --project-name idrici_ai build_app
+
+      - name: Inspect Android build configuration
+        run: |
+          echo "===== Gradle wrapper ====="
+          cat build_app/android/gradle/wrapper/gradle-wrapper.properties
+
+          echo "===== Android Gradle Plugin and Kotlin ====="
+          grep -nE "com.android.application|org.jetbrains.kotlin.android|kotlin" \
+            build_app/android/settings.gradle \
+            build_app/android/build.gradle \
+            build_app/android/app/build.gradle \
+            build_app/android/app/build.gradle.kts 2>/dev/null || true
 
       - name: Copy Idrici AI application files
         run: |
@@ -44,6 +67,7 @@ jobs:
           permissions = [
               '    <uses-permission android:name="android.permission.INTERNET"/>',
               '    <uses-permission android:name="android.permission.RECORD_AUDIO"/>',
+              '    <uses-permission android:name="android.permission.CAMERA"/>',
           ]
 
           for permission in permissions:
