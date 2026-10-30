@@ -1,6 +1,7 @@
+
 import importlib.util
 from pathlib import Path
-from typing import Literal
+from typing import Any, Callable, Literal
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -27,6 +28,9 @@ spec.loader.exec_module(provider_module)
 
 GroqModelProvider = provider_module.GroqModelProvider
 
+# يسمح باستبدال Groq بمزوّد تجريبي أثناء الاختبارات.
+provider_factory: Callable[[], Any] = GroqModelProvider
+
 
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
@@ -43,7 +47,10 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
-    history: list[ChatMessage] = Field(default_factory=list, max_length=12)
+    history: list[ChatMessage] = Field(
+        default_factory=list,
+        max_length=12,
+    )
 
     @field_validator("message")
     @classmethod
@@ -65,7 +72,7 @@ async def root():
 @app.post("/chat")
 async def chat(request: ChatRequest):
     try:
-        provider = GroqModelProvider()
+        provider = provider_factory()
 
         messages = [
             {
@@ -75,7 +82,7 @@ async def chat(request: ChatRequest):
             for item in request.history
         ]
 
-        # نضيف السؤال الحالي مرة واحدة فقط.
+        # يضاف السؤال الحالي مرة واحدة فقط.
         messages.append({
             "role": "user",
             "content": request.message,
@@ -83,9 +90,15 @@ async def chat(request: ChatRequest):
 
         result = await provider.generate(messages=messages)
 
+        if not isinstance(result, dict):
+            raise RuntimeError("Invalid AI provider response")
+
         reply = result.get("text", "")
+
         if not isinstance(reply, str) or not reply.strip():
-            raise RuntimeError("The AI provider returned an empty response")
+            raise RuntimeError(
+                "The AI provider returned an empty response"
+            )
 
         return {
             "reply": reply.strip(),
