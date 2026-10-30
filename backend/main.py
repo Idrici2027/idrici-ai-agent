@@ -1,9 +1,9 @@
-
 import importlib.util
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 app = FastAPI(title="Idrici AI API")
 
@@ -28,8 +28,30 @@ spec.loader.exec_module(provider_module)
 GroqModelProvider = provider_module.GroqModelProvider
 
 
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Message content cannot be empty")
+        return value
+
+
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=4000)
+    history: list[ChatMessage] = Field(default_factory=list, max_length=12)
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Message cannot be empty")
+        return value
 
 
 @app.get("/")
@@ -42,27 +64,32 @@ async def root():
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
-    if not request.message.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="Message cannot be empty",
-        )
-
     try:
         provider = GroqModelProvider()
 
-        result = await provider.generate(
-            messages=[
-                {
-                    "role": "user",
-                    "content": request.message,
-                }
-            ]
-        )
+        messages = [
+            {
+                "role": item.role,
+                "content": item.content,
+            }
+            for item in request.history
+        ]
+
+        # نضيف السؤال الحالي مرة واحدة فقط.
+        messages.append({
+            "role": "user",
+            "content": request.message,
+        })
+
+        result = await provider.generate(messages=messages)
+
+        reply = result.get("text", "")
+        if not isinstance(reply, str) or not reply.strip():
+            raise RuntimeError("The AI provider returned an empty response")
 
         return {
-            "reply": result["text"],
-            "provider": result["provider"],
+            "reply": reply.strip(),
+            "provider": result.get("provider", "unknown"),
         }
 
     except Exception as exc:
