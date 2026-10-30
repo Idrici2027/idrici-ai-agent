@@ -81,6 +81,7 @@ class _ChatScreenState extends State<ChatScreen>
   bool _isSpeaking = false;
   bool _stopRequested = false;
   bool _appInBackground = false;
+  bool _isExiting = false;
 
   @override
   void initState() {
@@ -97,12 +98,16 @@ class _ChatScreenState extends State<ChatScreen>
   Future<void> _initializeNativeBridge() async {
     try {
       final result = await _nativeVisionChannel
-          .invokeMapMethod<String, dynamic>('getNativeBridgeStatus');
+          .invokeMapMethod<String, dynamic>(
+        'getNativeBridgeStatus',
+      );
 
       if (!mounted) return;
 
-      final platform = result?['platform']?.toString() ?? 'unknown';
-      final bridge = result?['bridge']?.toString() ?? 'unknown';
+      final platform =
+          result?['platform']?.toString() ?? 'unknown';
+      final bridge =
+          result?['bridge']?.toString() ?? 'unknown';
 
       setState(() {
         _nativeBridgeStatus = bridge == 'ready'
@@ -112,7 +117,8 @@ class _ChatScreenState extends State<ChatScreen>
     } on PlatformException catch (error) {
       if (!mounted) return;
       setState(() {
-        _nativeBridgeStatus = 'فشل الاتصال الأصلي: ${error.code}';
+        _nativeBridgeStatus =
+            'فشل الاتصال الأصلي: ${error.code}';
       });
     } on MissingPluginException {
       if (!mounted) return;
@@ -373,7 +379,8 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   Future<void> _startListening() async {
-    if (_isLoading || _isListening || _appInBackground) {
+    if (_isLoading || _isListening || _appInBackground ||
+        _isExiting) {
       return;
     }
 
@@ -401,7 +408,9 @@ class _ChatScreenState extends State<ChatScreen>
 
       await _speech.listen(
         onResult: (result) {
-          if (!mounted || _appInBackground) return;
+          if (!mounted || _appInBackground || _isExiting) {
+            return;
+          }
 
           setState(() {
             _messageController.text =
@@ -451,6 +460,37 @@ class _ChatScreenState extends State<ChatScreen>
       _isListening = false;
       _speechStatus = 'تم إيقاف الاستماع';
     });
+  }
+
+  Future<void> _toggleListening() async {
+    if (_isListening) {
+      await _stopListening();
+    } else {
+      await _startListening();
+    }
+  }
+
+  Future<void> _exitApp() async {
+    if (_isExiting) return;
+
+    _isExiting = true;
+    _stopRequested = true;
+    _appInBackground = true;
+
+    try {
+      await _speech.cancel();
+      await _speech.stop();
+      await _tts.stop();
+    } catch (_) {}
+
+    if (!mounted) return;
+
+    setState(() {
+      _isListening = false;
+      _isSpeaking = false;
+    });
+
+    await SystemNavigator.pop();
   }
 
   String _cleanTextForSpeech(String text) {
@@ -698,7 +738,8 @@ class _ChatScreenState extends State<ChatScreen>
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
 
-    if (text.isEmpty || _isLoading || _appInBackground) {
+    if (text.isEmpty || _isLoading || _appInBackground ||
+        _isExiting) {
       return;
     }
 
@@ -932,21 +973,21 @@ class _ChatScreenState extends State<ChatScreen>
                       ),
                     ),
                     Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 2,
-                ),
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: Text(
-                    _nativeBridgeStatus,
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: Color(0xFF8CA7B8),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 2,
+                      ),
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: Text(
+                          _nativeBridgeStatus,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Color(0xFF8CA7B8),
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-              ),
                     if (_lastSpeechError.isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.symmetric(
@@ -1032,6 +1073,8 @@ class _ChatScreenState extends State<ChatScreen>
                           ),
                         ),
                       ),
+
+                    // حقل الكتابة وعمود الأزرار
                     Padding(
                       padding: const EdgeInsets.fromLTRB(
                         10,
@@ -1039,61 +1082,110 @@ class _ChatScreenState extends State<ChatScreen>
                         10,
                         12,
                       ),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: _messageController,
-                              minLines: 1,
-                              maxLines: 3,
-                              onSubmitted: (_) => _sendMessage(),
-                              decoration: InputDecoration(
-                                hintText: 'اكتب رسالتك...',
-                                filled: true,
-                                fillColor:
-                                    const Color(0xFF252F40),
-                                border: OutlineInputBorder(
-                                  borderRadius:
-                                      BorderRadius.circular(18),
-                                  borderSide: BorderSide.none,
+                      child: Directionality(
+                        textDirection: TextDirection.ltr,
+                        child: Row(
+                          crossAxisAlignment:
+                              CrossAxisAlignment.end,
+                          children: [
+                            // حقل الكتابة على اليسار
+                            Expanded(
+                              child: Directionality(
+                                textDirection:
+                                    TextDirection.rtl,
+                                child: TextField(
+                                  controller:
+                                      _messageController,
+                                  minLines: 1,
+                                  maxLines: 3,
+                                  onSubmitted: (_) =>
+                                      _sendMessage(),
+                                  decoration: InputDecoration(
+                                    hintText: 'اكتب رسالتك...',
+                                    filled: true,
+                                    fillColor:
+                                        const Color(0xFF252F40),
+                                    border: OutlineInputBorder(
+                                      borderRadius:
+                                          BorderRadius.circular(
+                                        18,
+                                      ),
+                                      borderSide:
+                                          BorderSide.none,
+                                    ),
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
-                          const SizedBox(width: 5),
-                          IconButton.filled(
-                            tooltip: _isListening
-                                ? 'إيقاف الاستماع'
-                                : 'تحدث إلى Idrici AI',
-                            onPressed: _isLoading
-                                ? null
-                                : (_isListening
-                                    ? _stopListening
-                                    : _startListening),
-                            icon: Icon(
-                              _isListening
-                                  ? Icons.mic
-                                  : Icons.mic_none,
+
+                            const SizedBox(width: 8),
+
+                            // الأزرار في عمود على أقصى اليمين
+                            Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                // زر الخروج
+                                IconButton(
+                                  tooltip: 'خروج',
+                                  onPressed: _exitApp,
+                                  icon: const Icon(
+                                    Icons.close,
+                                  ),
+                                  iconSize: 25,
+                                  color: Colors.redAccent,
+                                  style: IconButton.styleFrom(
+                                    backgroundColor:
+                                        const Color(0xFF252F40),
+                                    foregroundColor:
+                                        Colors.redAccent,
+                                    shape: const CircleBorder(),
+                                  ),
+                                ),
+
+                                const SizedBox(height: 5),
+
+                                // زر الميكروفون
+                                IconButton.filled(
+                                  tooltip: _isListening
+                                      ? 'إيقاف الاستماع'
+                                      : 'تحدث إلى Idrici AI',
+                                  onPressed: _isLoading
+                                      ? null
+                                      : _toggleListening,
+                                  icon: Icon(
+                                    _isListening
+                                        ? Icons.mic
+                                        : Icons.mic_none,
+                                  ),
+                                  style: IconButton.styleFrom(
+                                    backgroundColor: _isListening
+                                        ? Colors.redAccent
+                                        : const Color(0xFF155B75),
+                                    foregroundColor: Colors.white,
+                                  ),
+                                ),
+
+                                const SizedBox(height: 5),
+
+                                // زر الإرسال
+                                IconButton.filled(
+                                  tooltip: 'إرسال',
+                                  onPressed: _isLoading
+                                      ? null
+                                      : _sendMessage,
+                                  icon: const Icon(
+                                    Icons.send,
+                                  ),
+                                  style: IconButton.styleFrom(
+                                    backgroundColor:
+                                        const Color(0xFF42CFFF),
+                                    foregroundColor: Colors.black,
+                                  ),
+                                ),
+                              ],
                             ),
-                            style: IconButton.styleFrom(
-                              backgroundColor: _isListening
-                                  ? Colors.redAccent
-                                  : const Color(0xFF155B75),
-                              foregroundColor: Colors.white,
-                            ),
-                          ),
-                          const SizedBox(width: 5),
-                          IconButton.filled(
-                            onPressed:
-                                _isLoading ? null : _sendMessage,
-                            icon: const Icon(Icons.send),
-                            style: IconButton.styleFrom(
-                              backgroundColor:
-                                  const Color(0xFF42CFFF),
-                              foregroundColor: Colors.black,
-                            ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                   ],
