@@ -11,6 +11,8 @@ dependencies:
     sdk: flutter
   http: ^1.2.2
   webview_flutter: ^4.10.0
+  speech_to_text: ^7.3.0
+  flutter_tts: ^4.2.5
 
 dev_dependencies:
   flutter_test:
