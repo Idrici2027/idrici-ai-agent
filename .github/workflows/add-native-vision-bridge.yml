@@ -3,6 +3,11 @@ name: Add Native Vision Bridge
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/electric-humanoid-ui
+    paths:
+      - '.github/workflows/add-native-vision-bridge.yml'
 
 permissions:
   contents: write
