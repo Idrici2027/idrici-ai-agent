@@ -1,4 +1,3 @@
-
 name: idrici_ai
 description: Idrici AI Android application
 publish_to: 'none'
@@ -20,3 +19,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/3d/
