@@ -1,0 +1,59 @@
+
+name: Generate Android Native Scaffold
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verify target branch
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/feature/electric-humanoid-ui" ]; then
+            echo "Wrong branch. Stopping."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: feature/electric-humanoid-ui
+
+      - name: Check Android directory
+        run: |
+          if [ -d "android_app/android" ]; then
+            echo "Android directory already exists. Stopping to avoid overwriting."
+            exit 1
+          fi
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Generate native Android project
+        working-directory: android_app
+        run: |
+          flutter create --platforms=android --project-name idrici_ai .
+
+      - name: Verify generated files
+        run: |
+          test -f android_app/android/app/src/main/AndroidManifest.xml
+          find android_app/android -maxdepth 5 -type f
+
+      - name: Commit Android scaffold
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add android_app/android
+          if git diff --cached --quiet; then
+            echo "No Android files to commit."
+            exit 1
+          fi
+          git commit -m "Generate native Android scaffold"
+          git push origin HEAD:feature/electric-humanoid-ui
