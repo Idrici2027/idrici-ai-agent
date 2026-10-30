@@ -1,5 +1,4 @@
 import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:http/http.dart' as http;
@@ -38,7 +37,8 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen>
+    with WidgetsBindingObserver {
   static const String apiUrl =
       'https://idrici-ai-agent.onrender.com/chat';
 
@@ -46,7 +46,6 @@ class _ChatScreenState extends State<ChatScreen> {
 
   final TextEditingController _messageController =
       TextEditingController();
-
   final ScrollController _scrollController =
       ScrollController();
 
@@ -66,14 +65,41 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _speechReady = false;
   bool _isListening = false;
   bool _isSpeaking = false;
+  bool _stopRequested = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     _initializeWebView();
     _initializeTts();
     _initializeSpeech();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _stopSpeechAndTts();
+    }
+  }
+
+  Future<void> _stopSpeechAndTts() async {
+    _stopRequested = true;
+
+    try {
+      await _speech.stop();
+      await _tts.stop();
+    } catch (_) {}
+
+    if (mounted) {
+      setState(() {
+        _isListening = false;
+        _isSpeaking = false;
+      });
+    }
   }
 
   void _initializeWebView() {
@@ -93,12 +119,12 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _initializeTts() async {
-    await _tts.setSpeechRate(0.45);
+    await _tts.setSpeechRate(0.42);
     await _tts.setVolume(1.0);
     await _tts.setPitch(1.0);
 
     _tts.setStartHandler(() {
-      if (mounted) {
+      if (mounted && !_stopRequested) {
         setState(() => _isSpeaking = true);
       }
     });
@@ -141,10 +167,6 @@ class _ChatScreenState extends State<ChatScreen> {
             _lastSpeechError = error.errorMsg;
             _speechStatus = 'خطأ في التعرف على الصوت';
           });
-
-          _showMessage(
-            'تعذر التعرف على الصوت: ${error.errorMsg}',
-          );
         },
       );
 
@@ -152,36 +174,51 @@ class _ChatScreenState extends State<ChatScreen> {
         if (mounted) {
           setState(() {
             _speechReady = false;
-            _speechStatus = 'خدمة التعرف على الصوت غير متاحة';
+            _speechStatus =
+                'خدمة التعرف على الصوت غير متاحة';
           });
         }
         return;
       }
 
       final locales = await _speech.locales();
-
       if (!mounted) return;
 
-      String? preferredLocale;
+      // نبدأ بلغة الهاتف إذا كانت مدعومة.
+      final systemLanguage =
+          WidgetsBinding.instance.platformDispatcher.locale;
 
-      for (final candidate in [
-        'ar-DZ',
-        'ar-SA',
-        'ar',
-        'fr-FR',
-        'fr',
-        'en-US',
-        'en',
-      ]) {
-        final match = locales.where(
-          (locale) =>
-              locale.localeId.toLowerCase() ==
-              candidate.toLowerCase(),
-        );
+      LocaleName? selected;
 
-        if (match.isNotEmpty) {
-          preferredLocale = match.first.localeId;
+      for (final locale in locales) {
+        if (locale.localeId.toLowerCase() ==
+            systemLanguage.toLanguageTag().toLowerCase()) {
+          selected = locale;
           break;
+        }
+      }
+
+      // إذا لم نجد لغة الهاتف، نبحث عن لغات مناسبة.
+      if (selected == null) {
+        final preferredLanguages = [
+          'ar-DZ',
+          'ar-SA',
+          'ar',
+          'fr-FR',
+          'fr',
+          'en-US',
+          'en',
+        ];
+
+        for (final candidate in preferredLanguages) {
+          for (final locale in locales) {
+            if (locale.localeId.toLowerCase() ==
+                candidate.toLowerCase()) {
+              selected = locale;
+              break;
+            }
+          }
+          if (selected != null) break;
         }
       }
 
@@ -189,19 +226,19 @@ class _ChatScreenState extends State<ChatScreen> {
         _speechReady = true;
         _availableLocales = locales;
         _selectedLocaleId =
-            preferredLocale ??
+            selected?.localeId ??
             (locales.isNotEmpty ? locales.first.localeId : null);
 
         _speechStatus = locales.isEmpty
             ? 'لم يعثر الهاتف على لغات متاحة'
-            : 'تم العثور على ${locales.length} لغة';
+            : 'تم إعداد لغة الهاتف تلقائيًا';
       });
     } catch (e) {
       if (!mounted) return;
 
       setState(() {
         _speechReady = false;
-        _speechStatus = 'خطأ في تهيئة الصوت: $e';
+        _speechStatus = 'خطأ في تهيئة الصوت';
       });
     }
   }
@@ -221,11 +258,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (id.startsWith('ar')) {
       return 'العربية (${locale.localeId})';
     }
-
     if (id.startsWith('fr')) {
       return 'Français (${locale.localeId})';
     }
-
     if (id.startsWith('en')) {
       return 'English (${locale.localeId})';
     }
@@ -242,23 +277,18 @@ class _ChatScreenState extends State<ChatScreen> {
       await _initializeSpeech();
     }
 
-    if (!_speechReady) {
-      _showMessage(
-        'خدمة التعرف على الصوت غير متاحة على هذا الهاتف.',
-      );
-      return;
-    }
-
-    if (_selectedLocaleId == null) {
-      _showMessage('لم يتم العثور على لغة للتعرف على الصوت.');
+    if (!_speechReady || _selectedLocaleId == null) {
+      _showMessage('خدمة التعرف على الصوت غير متاحة.');
       return;
     }
 
     try {
+      _stopRequested = false;
+
       setState(() {
+        _isSpeaking = false;
         _lastSpeechError = '';
-        _speechStatus =
-            'جارٍ الاستماع باللغة: $_selectedLocaleId';
+        _speechStatus = 'جارٍ الاستماع...';
       });
 
       await _speech.listen(
@@ -274,11 +304,9 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             );
 
-            if (result.finalResult) {
-              _speechStatus = 'اكتمل تحويل الكلام إلى كتابة';
-            } else {
-              _speechStatus = 'جاري تحويل كلامك إلى كتابة...';
-            }
+            _speechStatus = result.finalResult
+                ? 'اكتمل تحويل الكلام إلى كتابة'
+                : 'جاري تحويل كلامك إلى كتابة...';
           });
         },
         localeId: _selectedLocaleId,
@@ -301,8 +329,6 @@ class _ChatScreenState extends State<ChatScreen> {
           _speechStatus = 'تعذر تشغيل الاستماع';
         });
       }
-
-      _showMessage('تعذر تشغيل الميكروفون: $e');
     }
   }
 
@@ -317,17 +343,160 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  // تنظيف النص قبل تحويله إلى صوت.
+  String _cleanTextForSpeech(String text) {
+    String clean = text;
+
+    // إزالة كتل الأكواد.
+    clean = clean.replaceAll(
+      RegExp(r'```[\s\S]*?```'),
+      ' ',
+    );
+
+    // إزالة الأكواد القصيرة.
+    clean = clean.replaceAll(
+      RegExp(r'`[^`]*`'),
+      ' ',
+    );
+
+    // إزالة الروابط.
+    clean = clean.replaceAll(
+      RegExp(r'https?://\S+'),
+      ' ',
+    );
+
+    // إزالة عناوين Markdown.
+    clean = clean.replaceAll(
+      RegExp(r'^\s{0,3}#{1,6}\s*', multiLine: true),
+      '',
+    );
+
+    // إزالة علامات Markdown.
+    clean = clean.replaceAll(
+      RegExp(r'[*_~>|]'),
+      ' ',
+    );
+
+    // إزالة بعض الرموز التقنية.
+    clean = clean.replaceAll(
+      RegExp(r'[{}\[\]<>\\|]'),
+      ' ',
+    );
+
+    // إزالة الرموز التعبيرية والرموز الزخرفية.
+    clean = clean.replaceAll(
+      RegExp(
+        r'[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]',
+        unicode: true,
+      ),
+      ' ',
+    );
+
+    clean = clean.replaceAll(
+      RegExp(r'\s+'),
+      ' ',
+    );
+
+    return clean.trim();
+  }
+
+  String _detectReplyLanguage(String text) {
+    if (RegExp(r'[\u0600-\u06FF]').hasMatch(text)) {
+      return 'ar-SA';
+    }
+
+    if (RegExp(r'[àâçéèêëîïôûùüÿœæ]').hasMatch(
+      text.toLowerCase(),
+    )) {
+      return 'fr-FR';
+    }
+
+    return 'en-US';
+  }
+
+  List<String> _splitIntoChunks(String text) {
+    final sentences = text
+        .split(RegExp(r'(?<=[.!?؟۔])\s+'))
+        .where((s) => s.trim().isNotEmpty)
+        .toList();
+
+    final chunks = <String>[];
+    String current = '';
+
+    for (final sentence in sentences) {
+      final part = sentence.trim();
+
+      if (part.length > 250) {
+        if (current.isNotEmpty) {
+          chunks.add(current);
+          current = '';
+        }
+
+        for (int i = 0; i < part.length; i += 250) {
+          final end = (i + 250 < part.length)
+              ? i + 250
+              : part.length;
+          chunks.add(part.substring(i, end));
+        }
+        continue;
+      }
+
+      if (current.length + part.length > 250) {
+        if (current.isNotEmpty) chunks.add(current);
+        current = part;
+      } else {
+        current = current.isEmpty ? part : '$current $part';
+      }
+    }
+
+    if (current.isNotEmpty) chunks.add(current);
+
+    return chunks;
+  }
+
   Future<void> _speakReply(String text) async {
     try {
       await _tts.stop();
-      await _tts.setLanguage('ar-SA');
-      await _tts.speak(text);
-    } catch (e) {
-      if (mounted) {
-        _showMessage(
-          'تعذر تشغيل الصوت. تحقق من محرك النطق في الهاتف.',
+
+      final cleanText = _cleanTextForSpeech(text);
+
+      if (cleanText.isEmpty || _stopRequested) return;
+
+      final language = _detectReplyLanguage(cleanText);
+      await _tts.setLanguage(language);
+
+      final chunks = _splitIntoChunks(cleanText);
+
+      for (final chunk in chunks) {
+        if (_stopRequested || !mounted) break;
+
+        await _tts.speak(chunk);
+
+        // انتظار انتهاء المقطع قبل نطق المقطع التالي.
+        await _tts.awaitSpeakCompletion(true);
+
+        if (_stopRequested || !mounted) break;
+        await Future.delayed(
+          const Duration(milliseconds: 250),
         );
       }
+    } catch (e) {
+      if (mounted && !_stopRequested) {
+        _showMessage('تعذر تشغيل الصوت.');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSpeaking = false);
+      }
+    }
+  }
+
+  Future<void> _stopSpeaking() async {
+    _stopRequested = true;
+    await _tts.stop();
+
+    if (mounted) {
+      setState(() => _isSpeaking = false);
     }
   }
 
@@ -344,6 +513,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _speech.stop();
     _tts.stop();
     _messageController.dispose();
@@ -372,7 +542,8 @@ class _ChatScreenState extends State<ChatScreen> {
       await _stopListening();
     }
 
-    await _tts.stop();
+    await _stopSpeaking();
+    _stopRequested = false;
 
     setState(() {
       _messages.add({
@@ -457,6 +628,17 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ],
         ),
+        actions: [
+          if (_isSpeaking)
+            IconButton(
+              tooltip: 'إيقاف الصوت',
+              onPressed: _stopSpeaking,
+              icon: const Icon(
+                Icons.volume_off,
+                color: Colors.redAccent,
+              ),
+            ),
+        ],
       ),
       body: SafeArea(
         child: Column(
@@ -500,7 +682,6 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                       ),
                     ),
-
                     Padding(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 12,
@@ -540,7 +721,6 @@ class _ChatScreenState extends State<ChatScreen> {
                         ],
                       ),
                     ),
-
                     Padding(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 12,
@@ -557,7 +737,6 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                       ),
                     ),
-
                     if (_lastSpeechError.isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.symmetric(
@@ -571,7 +750,6 @@ class _ChatScreenState extends State<ChatScreen> {
                           ),
                         ),
                       ),
-
                     Expanded(
                       child: ListView.builder(
                         controller: _scrollController,
@@ -585,9 +763,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               index == _messages.length) {
                             return const Padding(
                               padding: EdgeInsets.all(12),
-                              child: Text(
-                                'Idrici AI يفكر...',
-                              ),
+                              child: Text('Idrici AI يفكر...'),
                             );
                           }
 
@@ -626,7 +802,6 @@ class _ChatScreenState extends State<ChatScreen> {
                         },
                       ),
                     ),
-
                     if (_isListening)
                       const Padding(
                         padding: EdgeInsets.only(bottom: 6),
@@ -637,7 +812,6 @@ class _ChatScreenState extends State<ChatScreen> {
                           ),
                         ),
                       ),
-
                     if (_isSpeaking)
                       const Padding(
                         padding: EdgeInsets.only(bottom: 6),
@@ -648,7 +822,6 @@ class _ChatScreenState extends State<ChatScreen> {
                           ),
                         ),
                       ),
-
                     Padding(
                       padding: const EdgeInsets.fromLTRB(
                         10, 6, 10, 12,
