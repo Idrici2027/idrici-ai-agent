@@ -32,6 +32,8 @@ jobs:
           cp android_app/pubspec.yaml build_app/pubspec.yaml
           mkdir -p build_app/lib
           cp android_app/lib/main.dart build_app/lib/main.dart
+          mkdir -p build_app/assets/3d
+          cp -r android_app/assets/3d/. build_app/assets/3d/
 
       - name: Add Android Internet permission
         run: |
