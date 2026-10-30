@@ -1,0 +1,191 @@
+
+name: Add Native Vision Bridge
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  add-bridge:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/electric-humanoid-ui
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Update Flutter and Kotlin bridge
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          dart = Path("android_app/lib/main.dart")
+          kotlin = Path(
+              "android_app/android/app/src/main/kotlin/"
+              "com/example/idrici_ai/MainActivity.kt"
+          )
+
+          source = dart.read_text(encoding="utf-8")
+
+          if "com.idrici.ai/vision" in source:
+              raise SystemExit("Bridge already exists in main.dart. Stopping safely.")
+
+          source = source.replace(
+              "import 'package:flutter/material.dart';",
+              "import 'package:flutter/material.dart';\n"
+              "import 'package:flutter/services.dart';",
+              1
+          )
+
+          source = source.replace(
+              "  static const int maxChunkLength = 220;",
+              "  static const int maxChunkLength = 220;\n\n"
+              "  static const MethodChannel _nativeVisionChannel =\n"
+              "      MethodChannel('com.idrici.ai/vision');",
+              1
+          )
+
+          source = source.replace(
+              "  String _speechStatus = 'جارٍ تهيئة التعرف على الصوت...';",
+              "  String _speechStatus = 'جارٍ تهيئة التعرف على الصوت...';\n"
+              "  String _nativeBridgeStatus = 'جارٍ فحص الاتصال الأصلي...';",
+              1
+          )
+
+          source = source.replace(
+              "    _initializeWebView();\n    _initializeTts();",
+              "    _initializeNativeBridge();\n"
+              "    _initializeWebView();\n"
+              "    _initializeTts();",
+              1
+          )
+
+          marker = "  @override\n  void didChangeAppLifecycleState(AppLifecycleState state) {"
+
+          method = """  Future<void> _initializeNativeBridge() async {
+              try {
+                final result = await _nativeVisionChannel
+                    .invokeMapMethod<String, dynamic>('getNativeBridgeStatus');
+
+                if (!mounted) return;
+
+                final platform = result?['platform']?.toString() ?? 'unknown';
+                final bridge = result?['bridge']?.toString() ?? 'unknown';
+
+                setState(() {
+                  _nativeBridgeStatus = bridge == 'ready'
+                      ? 'الاتصال الأصلي: جاهز ($platform)'
+                      : 'الاتصال الأصلي: استجابة غير متوقعة';
+                });
+              } on PlatformException catch (error) {
+                if (!mounted) return;
+                setState(() {
+                  _nativeBridgeStatus = 'فشل الاتصال الأصلي: ${error.code}';
+                });
+              } on MissingPluginException {
+                if (!mounted) return;
+                setState(() {
+                  _nativeBridgeStatus = 'القناة الأصلية غير متاحة';
+                });
+              } catch (_) {
+                if (!mounted) return;
+                setState(() {
+                  _nativeBridgeStatus = 'تعذر فحص الاتصال الأصلي';
+                });
+              }
+            }
+
+          """
+
+          if marker not in source:
+              raise SystemExit("Could not find lifecycle insertion point.")
+
+          source = source.replace(marker, method + marker, 1)
+
+          ui_marker = "                    if (_lastSpeechError.isNotEmpty)\n                      Padding("
+
+          ui_add = """                    Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 2,
+                          ),
+                          child: Align(
+                            alignment: Alignment.centerRight,
+                            child: Text(
+                              _nativeBridgeStatus,
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Color(0xFF8CA7B8),
+                              ),
+                            ),
+                          ),
+                        ),
+          """
+
+          if ui_marker not in source:
+              raise SystemExit("Could not find UI insertion point.")
+
+          source = source.replace(ui_marker, ui_add + ui_marker, 1)
+
+          dart.write_text(source, encoding="utf-8")
+
+          kotlin.write_text("""package com.example.idrici_ai
+
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              companion object {
+                  private const val VISION_CHANNEL = "com.idrici.ai/vision"
+              }
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+
+                  MethodChannel(
+                      flutterEngine.dartExecutor.binaryMessenger,
+                      VISION_CHANNEL
+                  ).setMethodCallHandler { call, result ->
+                      when (call.method) {
+                          "getNativeBridgeStatus" -> {
+                              result.success(
+                                  mapOf(
+                                      "platform" to "android",
+                                      "bridge" to "ready"
+                                  )
+                              )
+                          }
+                          else -> result.notImplemented()
+                      }
+                  }
+              }
+          }
+          """, encoding="utf-8")
+
+          print("Flutter and Kotlin bridge files updated.")
+          PY
+
+      - name: Verify changes
+        run: |
+          grep -q "com.idrici.ai/vision" android_app/lib/main.dart
+          grep -q "getNativeBridgeStatus" android_app/lib/main.dart
+          grep -q "getNativeBridgeStatus" android_app/android/app/src/main/kotlin/com/example/idrici_ai/MainActivity.kt
+          git diff --check
+          git diff --stat
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add android_app/lib/main.dart android_app/android/app/src/main/kotlin/com/example/idrici_ai/MainActivity.kt
+          git commit -m "Add Flutter Android native vision bridge"
+          git push origin HEAD:feature/electric-humanoid-ui
