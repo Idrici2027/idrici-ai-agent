@@ -1,7 +1,9 @@
-
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:http/http.dart' as http;
+import 'package:speech_to_text/speech_to_text.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 void main() {
@@ -50,13 +52,27 @@ class _ChatScreenState extends State<ChatScreen> {
 
   final List<Map<String, String>> _messages = [];
 
+  final SpeechToText _speech = SpeechToText();
+  final FlutterTts _tts = FlutterTts();
+
   bool _isLoading = false;
   bool _webReady = false;
+  bool _speechReady = false;
+  bool _isListening = false;
+  bool _isSpeaking = false;
+
+  String _speechStatus = '';
 
   @override
   void initState() {
     super.initState();
 
+    _initializeWebView();
+    _initializeTts();
+    _initializeSpeech();
+  }
+
+  void _initializeWebView() {
     _webController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(const Color(0xFF030711))
@@ -72,8 +88,157 @@ class _ChatScreenState extends State<ChatScreen> {
       ..loadFlutterAsset('assets/3d/index.html');
   }
 
+  Future<void> _initializeTts() async {
+    await _tts.setSpeechRate(0.45);
+    await _tts.setVolume(1.0);
+    await _tts.setPitch(1.0);
+
+    _tts.setStartHandler(() {
+      if (mounted) {
+        setState(() => _isSpeaking = true);
+      }
+    });
+
+    _tts.setCompletionHandler(() {
+      if (mounted) {
+        setState(() => _isSpeaking = false);
+      }
+    });
+
+    _tts.setCancelHandler(() {
+      if (mounted) {
+        setState(() => _isSpeaking = false);
+      }
+    });
+
+    _tts.setErrorHandler((message) {
+      if (mounted) {
+        setState(() => _isSpeaking = false);
+      }
+    });
+  }
+
+  Future<void> _initializeSpeech() async {
+    try {
+      final available = await _speech.initialize(
+        onStatus: (status) {
+          if (!mounted) return;
+
+          setState(() {
+            _speechStatus = status;
+            _isListening = _speech.isListening;
+          });
+        },
+        onError: (error) {
+          if (!mounted) return;
+
+          setState(() {
+            _isListening = false;
+          });
+
+          _showMessage(
+            'تعذر التعرف على الصوت: ${error.errorMsg}',
+          );
+        },
+      );
+
+      if (mounted) {
+        setState(() {
+          _speechReady = available;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _speechReady = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _startListening() async {
+    if (_isLoading || _isListening) return;
+
+    await _tts.stop();
+
+    if (!_speechReady) {
+      await _initializeSpeech();
+    }
+
+    if (!_speechReady) {
+      _showMessage(
+        'خدمة التعرف على الصوت غير متاحة على هذا الهاتف.',
+      );
+      return;
+    }
+
+    try {
+      await _speech.listen(
+        onResult: (result) {
+          if (!mounted) return;
+
+          setState(() {
+            _messageController.text = result.recognizedWords;
+            _messageController.selection =
+                TextSelection.fromPosition(
+              TextPosition(
+                offset: _messageController.text.length,
+              ),
+            );
+          });
+        },
+        listenFor: const Duration(seconds: 45),
+        pauseFor: const Duration(seconds: 4),
+        partialResults: true,
+        cancelOnError: true,
+      );
+
+      if (mounted) {
+        setState(() => _isListening = true);
+      }
+    } catch (e) {
+      _showMessage('تعذر تشغيل الميكروفون: $e');
+    }
+  }
+
+  Future<void> _stopListening() async {
+    await _speech.stop();
+
+    if (mounted) {
+      setState(() => _isListening = false);
+    }
+  }
+
+  Future<void> _speakReply(String text) async {
+    try {
+      await _tts.stop();
+
+      await _tts.setLanguage('ar-SA');
+      await _tts.speak(text);
+    } catch (e) {
+      if (mounted) {
+        _showMessage(
+          'تعذر تشغيل الصوت. تحقق من محرك النطق في الهاتف.',
+        );
+      }
+    }
+  }
+
+  void _showMessage(String text) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(text),
+        backgroundColor: const Color(0xFF252F40),
+      ),
+    );
+  }
+
   @override
   void dispose() {
+    _speech.stop();
+    _tts.stop();
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -95,6 +260,12 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _messageController.text.trim();
 
     if (text.isEmpty || _isLoading) return;
+
+    if (_isListening) {
+      await _stopListening();
+    }
+
+    await _tts.stop();
 
     setState(() {
       _messages.add({
@@ -135,6 +306,10 @@ class _ChatScreenState extends State<ChatScreen> {
             'text': reply,
           });
         });
+
+        _scrollToBottom();
+
+        await _speakReply(reply);
       } else {
         throw Exception('HTTP ${response.statusCode}');
       }
@@ -180,7 +355,6 @@ class _ChatScreenState extends State<ChatScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // 3D character area
             Expanded(
               flex: 6,
               child: Stack(
@@ -200,7 +374,6 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
 
-            // Chat area
             Expanded(
               flex: 5,
               child: Container(
@@ -222,6 +395,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                       ),
                     ),
+
                     Expanded(
                       child: ListView.builder(
                         controller: _scrollController,
@@ -235,7 +409,9 @@ class _ChatScreenState extends State<ChatScreen> {
                               index == _messages.length) {
                             return const Padding(
                               padding: EdgeInsets.all(12),
-                              child: Text('Idrici AI يفكر...'),
+                              child: Text(
+                                'Idrici AI يفكر...',
+                              ),
                             );
                           }
 
@@ -274,6 +450,29 @@ class _ChatScreenState extends State<ChatScreen> {
                         },
                       ),
                     ),
+
+                    if (_isListening)
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          'أنا أستمع إليك...',
+                          style: TextStyle(
+                            color: Color(0xFF42CFFF),
+                          ),
+                        ),
+                      ),
+
+                    if (_isSpeaking)
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          'Idrici AI يتحدث...',
+                          style: TextStyle(
+                            color: Color(0xFF42CFFF),
+                          ),
+                        ),
+                      ),
+
                     Padding(
                       padding: const EdgeInsets.fromLTRB(
                         10, 6, 10, 12,
@@ -289,7 +488,8 @@ class _ChatScreenState extends State<ChatScreen> {
                               decoration: InputDecoration(
                                 hintText: 'اكتب رسالتك...',
                                 filled: true,
-                                fillColor: const Color(0xFF252F40),
+                                fillColor:
+                                    const Color(0xFF252F40),
                                 border: OutlineInputBorder(
                                   borderRadius:
                                       BorderRadius.circular(18),
@@ -298,7 +498,33 @@ class _ChatScreenState extends State<ChatScreen> {
                               ),
                             ),
                           ),
-                          const SizedBox(width: 8),
+
+                          const SizedBox(width: 5),
+
+                          IconButton.filled(
+                            tooltip: _isListening
+                                ? 'إيقاف الاستماع'
+                                : 'تحدث إلى Idrici AI',
+                            onPressed: _isLoading
+                                ? null
+                                : (_isListening
+                                    ? _stopListening
+                                    : _startListening),
+                            icon: Icon(
+                              _isListening
+                                  ? Icons.mic
+                                  : Icons.mic_none,
+                            ),
+                            style: IconButton.styleFrom(
+                              backgroundColor: _isListening
+                                  ? Colors.redAccent
+                                  : const Color(0xFF155B75),
+                              foregroundColor: Colors.white,
+                            ),
+                          ),
+
+                          const SizedBox(width: 5),
+
                           IconButton.filled(
                             onPressed:
                                 _isLoading ? null : _sendMessage,
