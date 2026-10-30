@@ -1,0 +1,65 @@
+
+name: Idrici AI Android Environment Check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Inspect Flutter and Java
+        run: |
+          echo "===== FLUTTER ====="
+          flutter --version
+
+          echo "===== DART ====="
+          dart --version
+
+          echo "===== JAVA ====="
+          java -version
+
+      - name: Create temporary Android project
+        run: |
+          flutter create --platforms=android \
+            --project-name idrici_ai diagnostic_app
+
+      - name: Inspect Android build versions
+        run: |
+          echo "===== GRADLE WRAPPER ====="
+          cat diagnostic_app/android/gradle/wrapper/gradle-wrapper.properties
+
+          echo "===== ANDROID GRADLE PLUGIN ====="
+          grep -nE "com.android.application|com.android.tools.build:gradle" \
+            diagnostic_app/android/settings.gradle \
+            diagnostic_app/android/build.gradle \
+            diagnostic_app/android/app/build.gradle \
+            diagnostic_app/android/app/build.gradle.kts \
+            2>/dev/null || true
+
+          echo "===== KOTLIN ====="
+          grep -nE "org.jetbrains.kotlin.android|kotlin_version" \
+            diagnostic_app/android/settings.gradle \
+            diagnostic_app/android/build.gradle \
+            diagnostic_app/android/app/build.gradle \
+            diagnostic_app/android/app/build.gradle.kts \
+            2>/dev/null || true
+
+      - name: Inspect camera dependency
+        run: |
+          grep -n "camera:" android_app/pubspec.yaml || true
+
+      - name: Finish diagnostics
+        run: echo "Idrici AI environment inspection completed."
