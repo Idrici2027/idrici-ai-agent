@@ -55,13 +55,17 @@ class _ChatScreenState extends State<ChatScreen> {
   final SpeechToText _speech = SpeechToText();
   final FlutterTts _tts = FlutterTts();
 
+  List<LocaleName> _availableLocales = [];
+
+  String? _selectedLocaleId;
+  String _speechStatus = 'جارٍ تهيئة التعرف على الصوت...';
+  String _lastSpeechError = '';
+
   bool _isLoading = false;
   bool _webReady = false;
   bool _speechReady = false;
   bool _isListening = false;
   bool _isSpeaking = false;
-
-  String _speechStatus = '';
 
   @override
   void initState() {
@@ -125,7 +129,7 @@ class _ChatScreenState extends State<ChatScreen> {
           if (!mounted) return;
 
           setState(() {
-            _speechStatus = status;
+            _speechStatus = 'حالة التعرف: $status';
             _isListening = _speech.isListening;
           });
         },
@@ -134,6 +138,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
           setState(() {
             _isListening = false;
+            _lastSpeechError = error.errorMsg;
+            _speechStatus = 'خطأ في التعرف على الصوت';
           });
 
           _showMessage(
@@ -142,18 +148,89 @@ class _ChatScreenState extends State<ChatScreen> {
         },
       );
 
-      if (mounted) {
-        setState(() {
-          _speechReady = available;
-        });
+      if (!available) {
+        if (mounted) {
+          setState(() {
+            _speechReady = false;
+            _speechStatus = 'خدمة التعرف على الصوت غير متاحة';
+          });
+        }
+        return;
       }
+
+      final locales = await _speech.locales();
+
+      if (!mounted) return;
+
+      String? preferredLocale;
+
+      for (final candidate in [
+        'ar-DZ',
+        'ar-SA',
+        'ar',
+        'fr-FR',
+        'fr',
+        'en-US',
+        'en',
+      ]) {
+        final match = locales.where(
+          (locale) =>
+              locale.localeId.toLowerCase() ==
+              candidate.toLowerCase(),
+        );
+
+        if (match.isNotEmpty) {
+          preferredLocale = match.first.localeId;
+          break;
+        }
+      }
+
+      setState(() {
+        _speechReady = true;
+        _availableLocales = locales;
+        _selectedLocaleId =
+            preferredLocale ??
+            (locales.isNotEmpty ? locales.first.localeId : null);
+
+        _speechStatus = locales.isEmpty
+            ? 'لم يعثر الهاتف على لغات متاحة'
+            : 'تم العثور على ${locales.length} لغة';
+      });
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _speechReady = false;
-        });
-      }
+      if (!mounted) return;
+
+      setState(() {
+        _speechReady = false;
+        _speechStatus = 'خطأ في تهيئة الصوت: $e';
+      });
     }
+  }
+
+  Future<void> _changeSpeechLanguage(String? localeId) async {
+    if (localeId == null || _isListening) return;
+
+    setState(() {
+      _selectedLocaleId = localeId;
+      _speechStatus = 'لغة التعرف المختارة: $localeId';
+    });
+  }
+
+  String _languageLabel(LocaleName locale) {
+    final id = locale.localeId.toLowerCase();
+
+    if (id.startsWith('ar')) {
+      return 'العربية (${locale.localeId})';
+    }
+
+    if (id.startsWith('fr')) {
+      return 'Français (${locale.localeId})';
+    }
+
+    if (id.startsWith('en')) {
+      return 'English (${locale.localeId})';
+    }
+
+    return '${locale.name} (${locale.localeId})';
   }
 
   Future<void> _startListening() async {
@@ -172,7 +249,18 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
+    if (_selectedLocaleId == null) {
+      _showMessage('لم يتم العثور على لغة للتعرف على الصوت.');
+      return;
+    }
+
     try {
+      setState(() {
+        _lastSpeechError = '';
+        _speechStatus =
+            'جارٍ الاستماع باللغة: $_selectedLocaleId';
+      });
+
       await _speech.listen(
         onResult: (result) {
           if (!mounted) return;
@@ -185,18 +273,35 @@ class _ChatScreenState extends State<ChatScreen> {
                 offset: _messageController.text.length,
               ),
             );
+
+            if (result.finalResult) {
+              _speechStatus = 'اكتمل تحويل الكلام إلى كتابة';
+            } else {
+              _speechStatus = 'جاري تحويل كلامك إلى كتابة...';
+            }
           });
         },
-        listenFor: const Duration(seconds: 45),
-        pauseFor: const Duration(seconds: 4),
+        localeId: _selectedLocaleId,
+        listenFor: const Duration(seconds: 60),
+        pauseFor: const Duration(seconds: 8),
         partialResults: true,
-        cancelOnError: true,
+        cancelOnError: false,
+        listenMode: ListenMode.dictation,
       );
 
       if (mounted) {
-        setState(() => _isListening = true);
+        setState(() {
+          _isListening = _speech.isListening;
+        });
       }
     } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isListening = false;
+          _speechStatus = 'تعذر تشغيل الاستماع';
+        });
+      }
+
       _showMessage('تعذر تشغيل الميكروفون: $e');
     }
   }
@@ -205,14 +310,16 @@ class _ChatScreenState extends State<ChatScreen> {
     await _speech.stop();
 
     if (mounted) {
-      setState(() => _isListening = false);
+      setState(() {
+        _isListening = false;
+        _speechStatus = 'تم إيقاف الاستماع';
+      });
     }
   }
 
   Future<void> _speakReply(String text) async {
     try {
       await _tts.stop();
-
       await _tts.setLanguage('ar-SA');
       await _tts.speak(text);
     } catch (e) {
@@ -308,7 +415,6 @@ class _ChatScreenState extends State<ChatScreen> {
         });
 
         _scrollToBottom();
-
         await _speakReply(reply);
       } else {
         throw Exception('HTTP ${response.statusCode}');
@@ -373,7 +479,6 @@ class _ChatScreenState extends State<ChatScreen> {
                 ],
               ),
             ),
-
             Expanded(
               flex: 5,
               child: Container(
@@ -395,6 +500,77 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                       ),
                     ),
+
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                      ),
+                      child: Row(
+                        children: [
+                          const Text(
+                            'لغة الميكروفون:',
+                            style: TextStyle(fontSize: 12),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: DropdownButton<String>(
+                              isExpanded: true,
+                              value: _availableLocales.any(
+                                (locale) =>
+                                    locale.localeId ==
+                                    _selectedLocaleId,
+                              )
+                                  ? _selectedLocaleId
+                                  : null,
+                              hint: const Text('اختر اللغة'),
+                              items: _availableLocales.map((locale) {
+                                return DropdownMenuItem<String>(
+                                  value: locale.localeId,
+                                  child: Text(
+                                    _languageLabel(locale),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                );
+                              }).toList(),
+                              onChanged: _isListening
+                                  ? null
+                                  : _changeSpeechLanguage,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 4,
+                      ),
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: Text(
+                          _speechStatus,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Color(0xFF42CFFF),
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    if (_lastSpeechError.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                        ),
+                        child: Text(
+                          'آخر خطأ: $_lastSpeechError',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.orangeAccent,
+                          ),
+                        ),
+                      ),
 
                     Expanded(
                       child: ListView.builder(
@@ -498,9 +674,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               ),
                             ),
                           ),
-
                           const SizedBox(width: 5),
-
                           IconButton.filled(
                             tooltip: _isListening
                                 ? 'إيقاف الاستماع'
@@ -522,9 +696,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               foregroundColor: Colors.white,
                             ),
                           ),
-
                           const SizedBox(width: 5),
-
                           IconButton.filled(
                             onPressed:
                                 _isLoading ? null : _sendMessage,
