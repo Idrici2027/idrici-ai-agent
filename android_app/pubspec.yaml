@@ -1,3 +1,4 @@
+
 name: idrici_ai
 description: Idrici AI Android application
 publish_to: 'none'
@@ -10,6 +11,7 @@ dependencies:
   flutter:
     sdk: flutter
   http: ^1.2.2
+  webview_flutter: ^4.10.0
 
 dev_dependencies:
   flutter_test:
