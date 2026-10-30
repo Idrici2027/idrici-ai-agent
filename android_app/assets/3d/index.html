@@ -1,1 +1,251 @@
 
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Idrici AI - 3D Core</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #030711;
+      font-family: Arial, sans-serif;
+    }
+    canvas { display: block; }
+    #label {
+      position: fixed;
+      top: 28px;
+      width: 100%;
+      text-align: center;
+      color: #b8eaff;
+      letter-spacing: 5px;
+      font-size: 17px;
+      text-shadow: 0 0 15px #00aaff;
+      pointer-events: none;
+    }
+    #status {
+      position: fixed;
+      bottom: 28px;
+      width: 100%;
+      text-align: center;
+      color: #58cfff;
+      font-size: 12px;
+      letter-spacing: 3px;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="label">IDRICI AI</div>
+  <div id="status">ENERGY CORE INITIALIZING</div>
+
+  <script type="module">
+    import * as THREE from
+      'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x030711, 0.045);
+
+    const camera = new THREE.PerspectiveCamera(
+      45, window.innerWidth / window.innerHeight, 0.1, 100
+    );
+    camera.position.set(0, 0, 8);
+
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: false
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x030711);
+    document.body.appendChild(renderer.domElement);
+
+    scene.add(new THREE.AmbientLight(0x3377aa, 1.5));
+
+    const blueLight = new THREE.PointLight(0x00aaff, 5, 12);
+    blueLight.position.set(0, 1, 3);
+    scene.add(blueLight);
+
+    const whiteLight = new THREE.PointLight(0xffffff, 2, 8);
+    whiteLight.position.set(0, -1, 2);
+    scene.add(whiteLight);
+
+    const energy = new THREE.Group();
+    scene.add(energy);
+
+    const coreGeometry = new THREE.SphereGeometry(0.48, 48, 48);
+    const coreMaterial = new THREE.MeshBasicMaterial({
+      color: 0x8beaff,
+      wireframe: true
+    });
+    const core = new THREE.Mesh(coreGeometry, coreMaterial);
+    energy.add(core);
+
+    const innerCore = new THREE.Mesh(
+      new THREE.SphereGeometry(0.28, 32, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.8
+      })
+    );
+    energy.add(innerCore);
+
+    const particlesCount = 1800;
+    const positions = new Float32Array(particlesCount * 3);
+    const particleGeometry = new THREE.BufferGeometry();
+
+    for (let i = 0; i < particlesCount; i++) {
+      const radius = 0.7 + Math.random() * 2.1;
+      const angle = Math.random() * Math.PI * 2;
+      const height = (Math.random() - 0.5) * 4;
+
+      positions[i * 3] = Math.cos(angle) * radius;
+      positions[i * 3 + 1] = height;
+      positions[i * 3 + 2] = Math.sin(angle) * radius;
+    }
+
+    particleGeometry.setAttribute(
+      'position',
+      new THREE.BufferAttribute(positions, 3)
+    );
+
+    const particles = new THREE.Points(
+      particleGeometry,
+      new THREE.PointsMaterial({
+        color: 0x42cfff,
+        size: 0.025,
+        transparent: true,
+        opacity: 0.85,
+        blending: THREE.AdditiveBlending
+      })
+    );
+    scene.add(particles);
+
+    const humanoid = new THREE.Group();
+    scene.add(humanoid);
+
+    const electricMaterial = new THREE.MeshStandardMaterial({
+      color: 0x102e50,
+      emissive: 0x0066bb,
+      emissiveIntensity: 2.2,
+      metalness: 0.8,
+      roughness: 0.25,
+      wireframe: true
+    });
+
+    function addBodyPart(x, y, z, sx, sy, sz) {
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(1, 24, 24),
+        electricMaterial
+      );
+      mesh.position.set(x, y, z);
+      mesh.scale.set(sx, sy, sz);
+      humanoid.add(mesh);
+      return mesh;
+    }
+
+    // Head, neck and upper body
+    addBodyPart(0, 1.55, 0, 0.43, 0.52, 0.38);
+    addBodyPart(0, 0.95, 0, 0.17, 0.25, 0.17);
+    addBodyPart(0, 0.15, 0, 0.78, 0.85, 0.34);
+
+    // Shoulders
+    addBodyPart(-0.85, 0.55, 0, 0.38, 0.3, 0.32);
+    addBodyPart(0.85, 0.55, 0, 0.38, 0.3, 0.32);
+
+    // Arms and hands
+    for (const side of [-1, 1]) {
+      addBodyPart(side * 1.12, 0.05, 0, 0.23, 0.58, 0.22);
+      addBodyPart(side * 1.35, -0.65, 0, 0.17, 0.5, 0.17);
+      addBodyPart(side * 1.38, -1.18, 0, 0.23, 0.28, 0.13);
+
+      // Fingers
+      for (let f = 0; f < 4; f++) {
+        const finger = addBodyPart(
+          side * (1.22 + f * 0.105),
+          -1.48 - Math.sin(f * 0.7) * 0.05,
+          0,
+          0.045,
+          0.18,
+          0.045
+        );
+        finger.rotation.z = side * -0.12;
+      }
+    }
+
+    const electricLines = [];
+
+    for (let i = 0; i < 18; i++) {
+      const points = [];
+      for (let j = 0; j < 12; j++) {
+        points.push(new THREE.Vector3(
+          (Math.random() - 0.5) * 3,
+          (Math.random() - 0.5) * 4,
+          (Math.random() - 0.5) * 0.8
+        ));
+      }
+
+      const geometry = new THREE.BufferGeometry().setFromPoints(points);
+      const line = new THREE.Line(
+        geometry,
+        new THREE.LineBasicMaterial({
+          color: i % 2 ? 0x33bbff : 0xffffff,
+          transparent: true,
+          opacity: 0.55
+        })
+      );
+      electricLines.push(line);
+      scene.add(line);
+    }
+
+    const clock = new THREE.Clock();
+
+    function animate() {
+      requestAnimationFrame(animate);
+
+      const t = clock.getElapsedTime();
+
+      core.rotation.x += 0.006;
+      core.rotation.y += 0.012;
+      innerCore.scale.setScalar(1 + Math.sin(t * 3) * 0.08);
+
+      particles.rotation.y = t * 0.12;
+      particles.rotation.x = Math.sin(t * 0.2) * 0.1;
+
+      energy.position.y = Math.sin(t * 1.5) * 0.12;
+      energy.rotation.y = t * 0.2;
+
+      // Gradually reveal the humanoid
+      const reveal = Math.min(1, t / 8);
+      humanoid.scale.setScalar(reveal);
+      humanoid.position.y = -0.15 + Math.sin(t * 1.3) * 0.035;
+      humanoid.rotation.y = Math.sin(t * 0.4) * 0.12;
+
+      electricLines.forEach((line, i) => {
+        line.rotation.y = t * (i % 2 ? 0.3 : -0.25);
+        line.material.opacity = 0.25 + Math.abs(Math.sin(t * 2 + i)) * 0.65;
+      });
+
+      blueLight.intensity = 4 + Math.sin(t * 3) * 1.5;
+
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    document.getElementById('status').textContent =
+      'IDRICI AI • 3D ENERGY SYSTEM';
+  </script>
+</body>
+</html>
+
