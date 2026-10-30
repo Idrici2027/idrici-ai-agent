@@ -1,11 +1,8 @@
+
 name: Build Idrici AI Android APK
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'android_app/**'
-      - '.github/workflows/build-android.yml'
 
 permissions:
   contents: read
