@@ -63,6 +63,7 @@ class _ChatScreenState extends State<ChatScreen>
   List<LocaleName> _availableLocales = [];
 
   String? _selectedLocaleId;
+  String? _pending3DReply;
 
   String _speechStatus = 'جارٍ تهيئة التعرف على الصوت...';
   String _lastSpeechError = '';
@@ -125,14 +126,47 @@ class _ChatScreenState extends State<ChatScreen>
       )
       ..setNavigationDelegate(
         NavigationDelegate(
-          onPageFinished: (url) {
-            if (mounted) {
-              setState(() => _webReady = true);
-            }
+          onPageFinished: (url) async {
+            if (!mounted) return;
+
+            setState(() => _webReady = true);
+
+            await _flushPending3DReply();
           },
         ),
       )
       ..loadFlutterAsset('assets/3d/index.html');
+  }
+
+  Future<void> _showReplyIn3D(String text) async {
+    final reply = text.trim();
+
+    if (reply.isEmpty) return;
+
+    if (!_webReady) {
+      _pending3DReply = reply;
+      return;
+    }
+
+    final safeText = jsonEncode(reply);
+
+    try {
+      await _webController.runJavaScript(
+        'window.Idrici3D && '
+        'window.Idrici3D.showReply($safeText);',
+      );
+    } catch (_) {
+      _pending3DReply = reply;
+    }
+  }
+
+  Future<void> _flushPending3DReply() async {
+    if (!_webReady || _pending3DReply == null) return;
+
+    final reply = _pending3DReply!;
+    _pending3DReply = null;
+
+    await _showReplyIn3D(reply);
   }
 
   Future<void> _initializeTts() async {
@@ -383,25 +417,21 @@ class _ChatScreenState extends State<ChatScreen>
   String _cleanTextForSpeech(String text) {
     String clean = text;
 
-    // حذف كتل الأكواد.
     clean = clean.replaceAll(
       RegExp(r'```[\s\S]*?```'),
       ' ',
     );
 
-    // حذف الأكواد القصيرة.
     clean = clean.replaceAll(
       RegExp(r'`[^`]*`'),
       ' ',
     );
 
-    // حذف الروابط.
     clean = clean.replaceAll(
       RegExp(r'https?://\S+'),
       ' ',
     );
 
-    // حذف عناوين Markdown.
     clean = clean.replaceAll(
       RegExp(
         r'^\s{0,3}#{1,6}\s*',
@@ -410,19 +440,16 @@ class _ChatScreenState extends State<ChatScreen>
       '',
     );
 
-    // حذف الرموز الزخرفية.
     clean = clean.replaceAll(
       RegExp(r'[*_~>|]'),
       ' ',
     );
 
-    // حذف الرموز التقنية.
     clean = clean.replaceAll(
       RegExp(r'[{}\[\]<>\\|]'),
       ' ',
     );
 
-    // حذف الرموز التعبيرية.
     clean = clean.replaceAll(
       RegExp(
         r'[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]',
@@ -431,7 +458,6 @@ class _ChatScreenState extends State<ChatScreen>
       ' ',
     );
 
-    // إزالة المسافات المتكررة.
     clean = clean.replaceAll(
       RegExp(r'\s+'),
       ' ',
@@ -530,7 +556,6 @@ class _ChatScreenState extends State<ChatScreen>
 
       if (cleanText.isEmpty) return;
 
-      // حد أقصى للنطق، مع إبقاء الرد كاملًا ظاهرًا.
       if (cleanText.length > maxSpeechCharacters) {
         cleanText = cleanText.substring(
           0,
@@ -615,7 +640,6 @@ class _ChatScreenState extends State<ChatScreen>
     });
   }
 
-  // إعداد سجل المحادثة لإرساله إلى الخادم.
   List<Map<String, String>> _buildHistory() {
     final previousMessages = _messages.length >
             maxHistoryMessages
@@ -647,7 +671,6 @@ class _ChatScreenState extends State<ChatScreen>
 
     if (!mounted) return;
 
-    // نحتفظ بسجل الرسائل السابقة قبل إضافة السؤال الحالي.
     final history = _buildHistory();
 
     setState(() {
@@ -697,6 +720,8 @@ class _ChatScreenState extends State<ChatScreen>
         });
 
         _scrollToBottom();
+
+        await _showReplyIn3D(reply.trim());
 
         await _speakReply(reply);
       } else {
