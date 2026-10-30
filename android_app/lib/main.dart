@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:http/http.dart' as http;
 import 'package:speech_to_text/speech_to_text.dart';
@@ -47,6 +48,9 @@ class _ChatScreenState extends State<ChatScreen>
   static const int maxSpeechCharacters = 1200;
   static const int maxChunkLength = 220;
 
+  static const MethodChannel _nativeVisionChannel =
+      MethodChannel('com.idrici.ai/vision');
+
   late final WebViewController _webController;
 
   final TextEditingController _messageController =
@@ -66,6 +70,7 @@ class _ChatScreenState extends State<ChatScreen>
   String? _pending3DReply;
 
   String _speechStatus = 'جارٍ تهيئة التعرف على الصوت...';
+  String _nativeBridgeStatus = 'جارٍ فحص الاتصال الأصلي...';
   String _lastSpeechError = '';
 
   bool _isLoading = false;
@@ -83,9 +88,43 @@ class _ChatScreenState extends State<ChatScreen>
 
     WidgetsBinding.instance.addObserver(this);
 
+    _initializeNativeBridge();
     _initializeWebView();
     _initializeTts();
     _initializeSpeech();
+  }
+
+  Future<void> _initializeNativeBridge() async {
+    try {
+      final result = await _nativeVisionChannel
+          .invokeMapMethod<String, dynamic>('getNativeBridgeStatus');
+
+      if (!mounted) return;
+
+      final platform = result?['platform']?.toString() ?? 'unknown';
+      final bridge = result?['bridge']?.toString() ?? 'unknown';
+
+      setState(() {
+        _nativeBridgeStatus = bridge == 'ready'
+            ? 'الاتصال الأصلي: جاهز ($platform)'
+            : 'الاتصال الأصلي: استجابة غير متوقعة';
+      });
+    } on PlatformException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _nativeBridgeStatus = 'فشل الاتصال الأصلي: ${error.code}';
+      });
+    } on MissingPluginException {
+      if (!mounted) return;
+      setState(() {
+        _nativeBridgeStatus = 'القناة الأصلية غير متاحة';
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _nativeBridgeStatus = 'تعذر فحص الاتصال الأصلي';
+      });
+    }
   }
 
   @override
@@ -892,6 +931,22 @@ class _ChatScreenState extends State<ChatScreen>
                         ),
                       ),
                     ),
+                    Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 2,
+                ),
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: Text(
+                    _nativeBridgeStatus,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Color(0xFF8CA7B8),
+                    ),
+                  ),
+                ),
+              ),
                     if (_lastSpeechError.isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.symmetric(
