@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout selected branch
         uses: actions/checkout@v4
 
       - name: Set up Flutter
@@ -22,44 +22,44 @@ jobs:
 
       - name: Inspect Flutter and Java
         run: |
-          echo "===== FLUTTER ====="
           flutter --version
-
-          echo "===== DART ====="
           dart --version
-
-          echo "===== JAVA ====="
           java -version
 
-      - name: Create temporary Android project
+      - name: Inspect real Idrici dependencies
+        run: |
+          echo "===== IDRICI PUBSPEC ====="
+          cat android_app/pubspec.yaml
+
+          echo "===== CAMERA VERSION ====="
+          grep -n "camera:" android_app/pubspec.yaml || true
+
+      - name: Generate temporary Android scaffold
         run: |
           flutter create --platforms=android \
             --project-name idrici_ai diagnostic_app
 
-      - name: Inspect Android build versions
+          cp android_app/pubspec.yaml diagnostic_app/pubspec.yaml
+          cd diagnostic_app
+          flutter pub get
+
+      - name: Inspect Android toolchain
+        working-directory: diagnostic_app/android
         run: |
-          echo "===== GRADLE WRAPPER ====="
-          cat diagnostic_app/android/gradle/wrapper/gradle-wrapper.properties
+          echo "===== GRADLE ====="
+          cat gradle/wrapper/gradle-wrapper.properties
 
           echo "===== ANDROID GRADLE PLUGIN ====="
-          grep -nE "com.android.application|com.android.tools.build:gradle" \
-            diagnostic_app/android/settings.gradle \
-            diagnostic_app/android/build.gradle \
-            diagnostic_app/android/app/build.gradle \
-            diagnostic_app/android/app/build.gradle.kts \
-            2>/dev/null || true
+          grep -nE 'com.android.application|com.android.tools.build:gradle' \
+            settings.gradle* build.gradle* app/build.gradle* || true
 
           echo "===== KOTLIN ====="
-          grep -nE "org.jetbrains.kotlin.android|kotlin_version" \
-            diagnostic_app/android/settings.gradle \
-            diagnostic_app/android/build.gradle \
-            diagnostic_app/android/app/build.gradle \
-            diagnostic_app/android/app/build.gradle.kts \
-            2>/dev/null || true
+          grep -nE 'org.jetbrains.kotlin.android|kotlin_version' \
+            settings.gradle* build.gradle* app/build.gradle* || true
 
-      - name: Inspect camera dependency
-        run: |
-          grep -n "camera:" android_app/pubspec.yaml || true
+          echo "===== ANDROID SDK CONFIG ====="
+          grep -nE 'minSdk|compileSdk|targetSdk' \
+            app/build.gradle* || true
 
       - name: Finish diagnostics
-        run: echo "Idrici AI environment inspection completed."
+        run: echo "Idrici AI diagnostic completed successfully."
