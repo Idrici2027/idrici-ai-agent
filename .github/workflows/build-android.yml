@@ -3,6 +3,11 @@ name: Build Idrici AI Android APK
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/electric-humanoid-ui
+    paths:
+      - '.github/workflows/build-android.yml'
 
 permissions:
   contents: read
@@ -12,88 +17,47 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout feature branch
         uses: actions/checkout@v4
+        with:
+          ref: feature/electric-humanoid-ui
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
 
-      - name: Inspect build environment
+      - name: Inspect environment
         run: |
-          echo "===== Flutter ====="
           flutter --version
-
-          echo "===== Dart ====="
           dart --version
-
-          echo "===== Java ====="
           java -version
 
-      - name: Create Android project structure
-        run: flutter create --platforms=android --project-name idrici_ai build_app
-
-      - name: Inspect Android build configuration
+      - name: Verify Android permissions
+        working-directory: android_app
         run: |
-          echo "===== Gradle wrapper ====="
-          cat build_app/android/gradle/wrapper/gradle-wrapper.properties
+          grep -q 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.CAMERA' android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.RECORD_AUDIO' android/app/src/main/AndroidManifest.xml
 
-          echo "===== Android Gradle Plugin and Kotlin ====="
-          grep -nE "com.android.application|org.jetbrains.kotlin.android|kotlin" \
-            build_app/android/settings.gradle \
-            build_app/android/build.gradle \
-            build_app/android/app/build.gradle \
-            build_app/android/app/build.gradle.kts 2>/dev/null || true
-
-      - name: Copy Idrici AI application files
-        run: |
-          cp android_app/pubspec.yaml build_app/pubspec.yaml
-          mkdir -p build_app/lib
-          cp android_app/lib/main.dart build_app/lib/main.dart
-          mkdir -p build_app/assets/3d
-          cp -r android_app/assets/3d/. build_app/assets/3d/
-
-      - name: Add Android permissions
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          manifest = Path(
-              "build_app/android/app/src/main/AndroidManifest.xml"
-          )
-          content = manifest.read_text()
-
-          permissions = [
-              '    <uses-permission android:name="android.permission.INTERNET"/>',
-              '    <uses-permission android:name="android.permission.RECORD_AUDIO"/>',
-              '    <uses-permission android:name="android.permission.CAMERA"/>',
-          ]
-
-          for permission in permissions:
-              permission_name = permission.split('"')[1]
-              if permission_name not in content:
-                  content = content.replace(
-                      "<application",
-                      permission + "\n    <application",
-                      1,
-                  )
-
-          manifest.write_text(content)
-          PY
-
-      - name: Get Flutter dependencies
-        working-directory: build_app
+      - name: Install dependencies
+        working-directory: android_app
         run: flutter pub get
 
-      - name: Build release APK
-        working-directory: build_app
+      - name: Build Idrici AI APK
+        working-directory: android_app
         run: flutter build apk --release
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Idrici-AI-APK
-          path: build_app/build/app/outputs/flutter-apk/app-release.apk
+          path: android_app/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 14
