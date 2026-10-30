@@ -1,4 +1,5 @@
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:http/http.dart' as http;
@@ -42,10 +43,15 @@ class _ChatScreenState extends State<ChatScreen>
   static const String apiUrl =
       'https://idrici-ai-agent.onrender.com/chat';
 
+  static const int maxHistoryMessages = 12;
+  static const int maxSpeechCharacters = 1200;
+  static const int maxChunkLength = 220;
+
   late final WebViewController _webController;
 
   final TextEditingController _messageController =
       TextEditingController();
+
   final ScrollController _scrollController =
       ScrollController();
 
@@ -57,19 +63,23 @@ class _ChatScreenState extends State<ChatScreen>
   List<LocaleName> _availableLocales = [];
 
   String? _selectedLocaleId;
+
   String _speechStatus = 'جارٍ تهيئة التعرف على الصوت...';
   String _lastSpeechError = '';
 
   bool _isLoading = false;
   bool _webReady = false;
   bool _speechReady = false;
+  bool _ttsReady = false;
   bool _isListening = false;
   bool _isSpeaking = false;
   bool _stopRequested = false;
+  bool _appInBackground = false;
 
   @override
   void initState() {
     super.initState();
+
     WidgetsBinding.instance.addObserver(this);
 
     _initializeWebView();
@@ -79,10 +89,15 @@ class _ChatScreenState extends State<ChatScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.paused ||
+    if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
+      _appInBackground = true;
       _stopSpeechAndTts();
+    }
+
+    if (state == AppLifecycleState.resumed) {
+      _appInBackground = false;
+      _stopRequested = false;
     }
   }
 
@@ -94,18 +109,20 @@ class _ChatScreenState extends State<ChatScreen>
       await _tts.stop();
     } catch (_) {}
 
-    if (mounted) {
-      setState(() {
-        _isListening = false;
-        _isSpeaking = false;
-      });
-    }
+    if (!mounted) return;
+
+    setState(() {
+      _isListening = false;
+      _isSpeaking = false;
+    });
   }
 
   void _initializeWebView() {
     _webController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(const Color(0xFF030711))
+      ..setBackgroundColor(
+        const Color(0xFF030711),
+      )
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageFinished: (url) {
@@ -119,33 +136,41 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   Future<void> _initializeTts() async {
-    await _tts.setSpeechRate(0.42);
-    await _tts.setVolume(1.0);
-    await _tts.setPitch(1.0);
+    try {
+      await _tts.awaitSpeakCompletion(true);
 
-    _tts.setStartHandler(() {
-      if (mounted && !_stopRequested) {
-        setState(() => _isSpeaking = true);
-      }
-    });
+      await _tts.setSpeechRate(0.42);
+      await _tts.setVolume(1.0);
+      await _tts.setPitch(1.0);
 
-    _tts.setCompletionHandler(() {
-      if (mounted) {
-        setState(() => _isSpeaking = false);
-      }
-    });
+      _tts.setStartHandler(() {
+        if (mounted && !_stopRequested) {
+          setState(() => _isSpeaking = true);
+        }
+      });
 
-    _tts.setCancelHandler(() {
-      if (mounted) {
-        setState(() => _isSpeaking = false);
-      }
-    });
+      _tts.setCompletionHandler(() {
+        if (mounted) {
+          setState(() => _isSpeaking = false);
+        }
+      });
 
-    _tts.setErrorHandler((message) {
-      if (mounted) {
-        setState(() => _isSpeaking = false);
-      }
-    });
+      _tts.setCancelHandler(() {
+        if (mounted) {
+          setState(() => _isSpeaking = false);
+        }
+      });
+
+      _tts.setErrorHandler((message) {
+        if (mounted) {
+          setState(() => _isSpeaking = false);
+        }
+      });
+
+      _ttsReady = true;
+    } catch (_) {
+      _ttsReady = false;
+    }
   }
 
   Future<void> _initializeSpeech() async {
@@ -182,9 +207,9 @@ class _ChatScreenState extends State<ChatScreen>
       }
 
       final locales = await _speech.locales();
+
       if (!mounted) return;
 
-      // نبدأ بلغة الهاتف إذا كانت مدعومة.
       final systemLanguage =
           WidgetsBinding.instance.platformDispatcher.locale;
 
@@ -198,7 +223,6 @@ class _ChatScreenState extends State<ChatScreen>
         }
       }
 
-      // إذا لم نجد لغة الهاتف، نبحث عن لغات مناسبة.
       if (selected == null) {
         final preferredLanguages = [
           'ar-DZ',
@@ -218,6 +242,7 @@ class _ChatScreenState extends State<ChatScreen>
               break;
             }
           }
+
           if (selected != null) break;
         }
       }
@@ -225,15 +250,17 @@ class _ChatScreenState extends State<ChatScreen>
       setState(() {
         _speechReady = true;
         _availableLocales = locales;
-        _selectedLocaleId =
-            selected?.localeId ??
-            (locales.isNotEmpty ? locales.first.localeId : null);
+
+        _selectedLocaleId = selected?.localeId ??
+            (locales.isNotEmpty
+                ? locales.first.localeId
+                : null);
 
         _speechStatus = locales.isEmpty
             ? 'لم يعثر الهاتف على لغات متاحة'
             : 'تم إعداد لغة الهاتف تلقائيًا';
       });
-    } catch (e) {
+    } catch (_) {
       if (!mounted) return;
 
       setState(() {
@@ -243,7 +270,9 @@ class _ChatScreenState extends State<ChatScreen>
     }
   }
 
-  Future<void> _changeSpeechLanguage(String? localeId) async {
+  Future<void> _changeSpeechLanguage(
+    String? localeId,
+  ) async {
     if (localeId == null || _isListening) return;
 
     setState(() {
@@ -258,9 +287,11 @@ class _ChatScreenState extends State<ChatScreen>
     if (id.startsWith('ar')) {
       return 'العربية (${locale.localeId})';
     }
+
     if (id.startsWith('fr')) {
       return 'Français (${locale.localeId})';
     }
+
     if (id.startsWith('en')) {
       return 'English (${locale.localeId})';
     }
@@ -269,16 +300,20 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   Future<void> _startListening() async {
-    if (_isLoading || _isListening) return;
+    if (_isLoading || _isListening || _appInBackground) {
+      return;
+    }
 
-    await _tts.stop();
+    await _stopSpeaking();
 
     if (!_speechReady) {
       await _initializeSpeech();
     }
 
     if (!_speechReady || _selectedLocaleId == null) {
-      _showMessage('خدمة التعرف على الصوت غير متاحة.');
+      _showMessage(
+        'خدمة التعرف على الصوت غير متاحة.',
+      );
       return;
     }
 
@@ -293,10 +328,12 @@ class _ChatScreenState extends State<ChatScreen>
 
       await _speech.listen(
         onResult: (result) {
-          if (!mounted) return;
+          if (!mounted || _appInBackground) return;
 
           setState(() {
-            _messageController.text = result.recognizedWords;
+            _messageController.text =
+                result.recognizedWords;
+
             _messageController.selection =
                 TextSelection.fromPosition(
               TextPosition(
@@ -322,7 +359,7 @@ class _ChatScreenState extends State<ChatScreen>
           _isListening = _speech.isListening;
         });
       }
-    } catch (e) {
+    } catch (_) {
       if (mounted) {
         setState(() {
           _isListening = false;
@@ -335,55 +372,57 @@ class _ChatScreenState extends State<ChatScreen>
   Future<void> _stopListening() async {
     await _speech.stop();
 
-    if (mounted) {
-      setState(() {
-        _isListening = false;
-        _speechStatus = 'تم إيقاف الاستماع';
-      });
-    }
+    if (!mounted) return;
+
+    setState(() {
+      _isListening = false;
+      _speechStatus = 'تم إيقاف الاستماع';
+    });
   }
 
-  // تنظيف النص قبل تحويله إلى صوت.
   String _cleanTextForSpeech(String text) {
     String clean = text;
 
-    // إزالة كتل الأكواد.
+    // حذف كتل الأكواد.
     clean = clean.replaceAll(
       RegExp(r'```[\s\S]*?```'),
       ' ',
     );
 
-    // إزالة الأكواد القصيرة.
+    // حذف الأكواد القصيرة.
     clean = clean.replaceAll(
       RegExp(r'`[^`]*`'),
       ' ',
     );
 
-    // إزالة الروابط.
+    // حذف الروابط.
     clean = clean.replaceAll(
       RegExp(r'https?://\S+'),
       ' ',
     );
 
-    // إزالة عناوين Markdown.
+    // حذف عناوين Markdown.
     clean = clean.replaceAll(
-      RegExp(r'^\s{0,3}#{1,6}\s*', multiLine: true),
+      RegExp(
+        r'^\s{0,3}#{1,6}\s*',
+        multiLine: true,
+      ),
       '',
     );
 
-    // إزالة علامات Markdown.
+    // حذف الرموز الزخرفية.
     clean = clean.replaceAll(
       RegExp(r'[*_~>|]'),
       ' ',
     );
 
-    // إزالة بعض الرموز التقنية.
+    // حذف الرموز التقنية.
     clean = clean.replaceAll(
       RegExp(r'[{}\[\]<>\\|]'),
       ' ',
     );
 
-    // إزالة الرموز التعبيرية والرموز الزخرفية.
+    // حذف الرموز التعبيرية.
     clean = clean.replaceAll(
       RegExp(
         r'[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]',
@@ -392,6 +431,7 @@ class _ChatScreenState extends State<ChatScreen>
       ' ',
     );
 
+    // إزالة المسافات المتكررة.
     clean = clean.replaceAll(
       RegExp(r'\s+'),
       ' ',
@@ -405,9 +445,19 @@ class _ChatScreenState extends State<ChatScreen>
       return 'ar-SA';
     }
 
-    if (RegExp(r'[àâçéèêëîïôûùüÿœæ]').hasMatch(
-      text.toLowerCase(),
-    )) {
+    final lower = text.toLowerCase();
+
+    if (RegExp(
+      r'[àâçéèêëîïôûùüÿœæ]',
+    ).hasMatch(lower)) {
+      return 'fr-FR';
+    }
+
+    final frenchWords = RegExp(
+      r'\b(le|la|les|des|une|un|est|sont|bonjour|merci|pour|avec|dans|vous|nous)\b',
+    );
+
+    if (frenchWords.hasMatch(lower)) {
       return 'fr-FR';
     }
 
@@ -426,61 +476,100 @@ class _ChatScreenState extends State<ChatScreen>
     for (final sentence in sentences) {
       final part = sentence.trim();
 
-      if (part.length > 250) {
+      if (part.length > maxChunkLength) {
         if (current.isNotEmpty) {
           chunks.add(current);
           current = '';
         }
 
-        for (int i = 0; i < part.length; i += 250) {
-          final end = (i + 250 < part.length)
-              ? i + 250
+        for (
+          int i = 0;
+          i < part.length;
+          i += maxChunkLength
+        ) {
+          final end = (i + maxChunkLength < part.length)
+              ? i + maxChunkLength
               : part.length;
+
           chunks.add(part.substring(i, end));
         }
+
         continue;
       }
 
-      if (current.length + part.length > 250) {
-        if (current.isNotEmpty) chunks.add(current);
+      if (current.length + part.length >
+          maxChunkLength) {
+        if (current.isNotEmpty) {
+          chunks.add(current);
+        }
+
         current = part;
       } else {
-        current = current.isEmpty ? part : '$current $part';
+        current = current.isEmpty
+            ? part
+            : '$current $part';
       }
     }
 
-    if (current.isNotEmpty) chunks.add(current);
+    if (current.isNotEmpty) {
+      chunks.add(current);
+    }
 
     return chunks;
   }
 
   Future<void> _speakReply(String text) async {
+    if (!_ttsReady || _stopRequested || _appInBackground) {
+      return;
+    }
+
     try {
       await _tts.stop();
 
-      final cleanText = _cleanTextForSpeech(text);
+      String cleanText = _cleanTextForSpeech(text);
 
-      if (cleanText.isEmpty || _stopRequested) return;
+      if (cleanText.isEmpty) return;
+
+      // حد أقصى للنطق، مع إبقاء الرد كاملًا ظاهرًا.
+      if (cleanText.length > maxSpeechCharacters) {
+        cleanText = cleanText.substring(
+          0,
+          maxSpeechCharacters,
+        );
+
+        if (mounted) {
+          _showMessage(
+            'الرد طويل؛ تم اختصار الجزء المنطوق فقط.',
+          );
+        }
+      }
 
       final language = _detectReplyLanguage(cleanText);
+
       await _tts.setLanguage(language);
 
       final chunks = _splitIntoChunks(cleanText);
 
       for (final chunk in chunks) {
-        if (_stopRequested || !mounted) break;
+        if (_stopRequested ||
+            _appInBackground ||
+            !mounted) {
+          break;
+        }
 
         await _tts.speak(chunk);
 
-        // انتظار انتهاء المقطع قبل نطق المقطع التالي.
-        await _tts.awaitSpeakCompletion(true);
+        if (_stopRequested ||
+            _appInBackground ||
+            !mounted) {
+          break;
+        }
 
-        if (_stopRequested || !mounted) break;
         await Future.delayed(
-          const Duration(milliseconds: 250),
+          const Duration(milliseconds: 200),
         );
       }
-    } catch (e) {
+    } catch (_) {
       if (mounted && !_stopRequested) {
         _showMessage('تعذر تشغيل الصوت.');
       }
@@ -493,7 +582,10 @@ class _ChatScreenState extends State<ChatScreen>
 
   Future<void> _stopSpeaking() async {
     _stopRequested = true;
-    await _tts.stop();
+
+    try {
+      await _tts.stop();
+    } catch (_) {}
 
     if (mounted) {
       setState(() => _isSpeaking = false);
@@ -511,16 +603,6 @@ class _ChatScreenState extends State<ChatScreen>
     );
   }
 
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _speech.stop();
-    _tts.stop();
-    _messageController.dispose();
-    _scrollController.dispose();
-    super.dispose();
-  }
-
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
@@ -533,24 +615,49 @@ class _ChatScreenState extends State<ChatScreen>
     });
   }
 
+  // إعداد سجل المحادثة لإرساله إلى الخادم.
+  List<Map<String, String>> _buildHistory() {
+    final previousMessages = _messages.length >
+            maxHistoryMessages
+        ? _messages.sublist(
+            _messages.length - maxHistoryMessages,
+          )
+        : _messages;
+
+    return previousMessages.map((message) {
+      return {
+        'role': message['role']!,
+        'content': message['text']!,
+      };
+    }).toList();
+  }
+
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
 
-    if (text.isEmpty || _isLoading) return;
+    if (text.isEmpty || _isLoading || _appInBackground) {
+      return;
+    }
 
     if (_isListening) {
       await _stopListening();
     }
 
     await _stopSpeaking();
-    _stopRequested = false;
+
+    if (!mounted) return;
+
+    // نحتفظ بسجل الرسائل السابقة قبل إضافة السؤال الحالي.
+    final history = _buildHistory();
 
     setState(() {
       _messages.add({
         'role': 'user',
         'text': text,
       });
+
       _isLoading = true;
+      _stopRequested = false;
     });
 
     _messageController.clear();
@@ -564,15 +671,19 @@ class _ChatScreenState extends State<ChatScreen>
         },
         body: jsonEncode({
           'message': text,
+          'history': history,
         }),
-      ).timeout(const Duration(seconds: 90));
+      ).timeout(
+        const Duration(seconds: 90),
+      );
 
       if (response.statusCode >= 200 &&
           response.statusCode < 300) {
         final data = jsonDecode(response.body);
+
         final reply = data['reply']?.toString();
 
-        if (reply == null || reply.isEmpty) {
+        if (reply == null || reply.trim().isEmpty) {
           throw Exception('لم يصل رد من الخادم.');
         }
 
@@ -581,22 +692,25 @@ class _ChatScreenState extends State<ChatScreen>
         setState(() {
           _messages.add({
             'role': 'assistant',
-            'text': reply,
+            'text': reply.trim(),
           });
         });
 
         _scrollToBottom();
+
         await _speakReply(reply);
       } else {
-        throw Exception('HTTP ${response.statusCode}');
+        throw Exception(
+          'HTTP ${response.statusCode}',
+        );
       }
-    } catch (e) {
+    } catch (_) {
       if (!mounted) return;
 
       setState(() {
         _messages.add({
           'role': 'assistant',
-          'text': 'تعذر الاتصال بالخادم: $e',
+          'text': 'تعذر الاتصال بالخادم. حاول مجددًا.',
         });
       });
     } finally {
@@ -605,6 +719,19 @@ class _ChatScreenState extends State<ChatScreen>
         _scrollToBottom();
       }
     }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+
+    _speech.stop();
+    _tts.stop();
+
+    _messageController.dispose();
+    _scrollController.dispose();
+
+    super.dispose();
   }
 
   @override
@@ -704,15 +831,18 @@ class _ChatScreenState extends State<ChatScreen>
                                   ? _selectedLocaleId
                                   : null,
                               hint: const Text('اختر اللغة'),
-                              items: _availableLocales.map((locale) {
-                                return DropdownMenuItem<String>(
-                                  value: locale.localeId,
-                                  child: Text(
-                                    _languageLabel(locale),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                );
-                              }).toList(),
+                              items: _availableLocales.map(
+                                (locale) {
+                                  return DropdownMenuItem<String>(
+                                    value: locale.localeId,
+                                    child: Text(
+                                      _languageLabel(locale),
+                                      overflow:
+                                          TextOverflow.ellipsis,
+                                    ),
+                                  );
+                                },
+                              ).toList(),
                               onChanged: _isListening
                                   ? null
                                   : _changeSpeechLanguage,
@@ -824,7 +954,10 @@ class _ChatScreenState extends State<ChatScreen>
                       ),
                     Padding(
                       padding: const EdgeInsets.fromLTRB(
-                        10, 6, 10, 12,
+                        10,
+                        6,
+                        10,
+                        12,
                       ),
                       child: Row(
                         children: [
