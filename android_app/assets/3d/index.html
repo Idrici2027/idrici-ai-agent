@@ -35,6 +35,7 @@ canvas {
   letter-spacing: 6px;
   text-shadow: 0 0 18px #00aaff;
   pointer-events: none;
+  z-index: 2;
 }
 
 #status {
@@ -46,6 +47,7 @@ canvas {
   font-size: 11px;
   letter-spacing: 2px;
   pointer-events: none;
+  z-index: 2;
 }
 
 #sound {
@@ -60,6 +62,65 @@ canvas {
   color: #b8efff;
   font-size: 13px;
   box-shadow: 0 0 18px #0088cc66;
+  z-index: 3;
+}
+
+/* Floating reply: transparent text, no background */
+#reply-layer {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  pointer-events: none;
+  z-index: 5;
+  overflow: hidden;
+}
+
+#reply-text {
+  max-width: 88%;
+  max-height: 55%;
+  overflow: hidden;
+  color: #e5faff;
+  font-size: clamp(15px, 3.5vw, 23px);
+  line-height: 1.65;
+  font-weight: 600;
+  text-align: center;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  direction: auto;
+  text-shadow:
+    0 0 5px #ffffff,
+    0 0 12px #35cfff,
+    0 0 25px #008cff,
+    0 0 42px #008cff;
+  opacity: 0;
+  transform: translateY(35px) scale(0.96);
+  transition: none;
+}
+
+#reply-text.visible {
+  animation: replyRise 7s ease-out forwards;
+}
+
+@keyframes replyRise {
+  0% {
+    opacity: 0;
+    transform: translateY(35px) scale(0.96);
+  }
+  10% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  72% {
+    opacity: 1;
+    transform: translateY(-35px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-90px) scale(0.97);
+  }
 }
 </style>
 </head>
@@ -69,6 +130,10 @@ canvas {
 <div id="label">IDRICI AI</div>
 <div id="status">ELECTRIC CORE INITIALIZING</div>
 <button id="sound">⚡ تفعيل صوت الكهرباء</button>
+
+<div id="reply-layer" aria-live="polite">
+  <div id="reply-text"></div>
+</div>
 
 <script type="module">
 
@@ -186,7 +251,6 @@ scene.add(particles);
 const bolts = [];
 
 function createBolt() {
-
   const points = [];
 
   let x = (Math.random() - 0.5) * 1.4;
@@ -194,7 +258,6 @@ function createBolt() {
   let z = (Math.random() - 0.5) * 0.8;
 
   for (let i = 0; i < 13; i++) {
-
     points.push(new THREE.Vector3(x, y, z));
 
     x += (Math.random() - 0.5) * 0.42;
@@ -224,9 +287,7 @@ function createBolt() {
 }
 
 function updateBolts(delta) {
-
   for (let i = bolts.length - 1; i >= 0; i--) {
-
     const bolt = bolts[i];
 
     bolt.life += delta;
@@ -260,7 +321,6 @@ const electricMaterial = new THREE.MeshBasicMaterial({
 });
 
 function bodyPart(x, y, z, sx, sy, sz) {
-
   const mesh = new THREE.Mesh(
     new THREE.IcosahedronGeometry(1, 3),
     electricMaterial
@@ -285,7 +345,6 @@ const chest = bodyPart(0, 0.12, 0, 0.73, 0.82, 0.34);
 const hands = [];
 
 for (const side of [-1, 1]) {
-
   const shoulder = bodyPart(
     side * 0.78, 0.52, 0,
     0.32, 0.28, 0.27
@@ -309,7 +368,6 @@ for (const side of [-1, 1]) {
   hands.push(hand);
 
   for (let f = 0; f < 5; f++) {
-
     const finger = bodyPart(
       side * (1.20 + f * 0.07),
       -1.28 - Math.sin(f * 0.6) * 0.05,
@@ -328,7 +386,6 @@ for (const side of [-1, 1]) {
 const bodyBolts = [];
 
 function createBodyThread() {
-
   const points = [];
 
   const start = new THREE.Vector3(
@@ -340,7 +397,6 @@ function createBodyThread() {
   let p = start.clone();
 
   for (let i = 0; i < 9; i++) {
-
     points.push(p.clone());
 
     p = p.clone().add(
@@ -371,6 +427,53 @@ for (let i = 0; i < 45; i++) {
   createBodyThread();
 }
 
+// REPLY DISPLAY API
+
+const replyElement = document.getElementById('reply-text');
+let replyAnimationTimer = null;
+
+function showReply(text) {
+  const safeText = String(text ?? '').trim();
+
+  if (!safeText) return;
+
+  replyElement.textContent =
+    safeText.length > 650
+      ? safeText.substring(0, 650) + '…'
+      : safeText;
+
+  // Restart the animation when a new reply arrives.
+  replyElement.classList.remove('visible');
+
+  if (replyAnimationTimer) {
+    clearTimeout(replyAnimationTimer);
+  }
+
+  // Force the browser to restart the CSS animation.
+  void replyElement.offsetWidth;
+
+  replyElement.classList.add('visible');
+
+  replyAnimationTimer = setTimeout(() => {
+    replyElement.classList.remove('visible');
+  }, 7200);
+}
+
+function clearReply() {
+  if (replyAnimationTimer) {
+    clearTimeout(replyAnimationTimer);
+  }
+
+  replyElement.classList.remove('visible');
+  replyElement.textContent = '';
+}
+
+// Public interface called by Flutter WebView.
+window.Idrici3D = Object.freeze({
+  showReply,
+  clearReply
+});
+
 // SOUND SYSTEM
 
 let audioContext = null;
@@ -378,7 +481,6 @@ let soundEnabled = false;
 let soundTimer = null;
 
 function playSpark() {
-
   if (!audioContext || !soundEnabled) return;
 
   const now = audioContext.currentTime;
@@ -410,7 +512,6 @@ function playSpark() {
 }
 
 document.getElementById('sound').addEventListener('click', async () => {
-
   if (!audioContext) {
     audioContext = new (
       window.AudioContext || window.webkitAudioContext
@@ -430,6 +531,7 @@ document.getElementById('sound').addEventListener('click', async () => {
 
   if (soundEnabled) {
     playSpark();
+
     soundTimer = setInterval(() => {
       if (Math.random() > 0.35) playSpark();
     }, 220);
@@ -441,7 +543,6 @@ document.getElementById('sound').addEventListener('click', async () => {
 const clock = new THREE.Clock();
 
 function animate() {
-
   requestAnimationFrame(animate);
 
   const delta = Math.min(clock.getDelta(), 0.04);
@@ -465,8 +566,7 @@ function animate() {
 
   updateBolts(delta);
 
-  // Gradual transformation
-
+  // Gradual visual reveal.
   const reveal = Math.min(1, t / 9);
   const smooth = reveal * reveal * (3 - 2 * reveal);
 
@@ -502,7 +602,6 @@ animate();
 // RESIZE
 
 window.addEventListener('resize', () => {
-
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
 
