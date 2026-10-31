@@ -1,616 +1,409 @@
-
 <!DOCTYPE html>
 <html lang="ar">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Idrici AI - Electric Being</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Idrici AI Hologram</title>
 
 <style>
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
+*{box-sizing:border-box}
+html,body{
+ margin:0;width:100%;height:100%;overflow:hidden;
+ background:#030611;color:#dffaff;font-family:Arial,sans-serif
 }
-
-html, body {
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  background: #02040c;
-  font-family: Arial, sans-serif;
+#stage{position:fixed;inset:0}
+#hud{
+ position:fixed;inset:0;pointer-events:none;
+ display:flex;flex-direction:column;
+ justify-content:space-between;padding:18px
 }
-
-canvas {
-  display: block;
+.top{display:flex;justify-content:space-between;align-items:center}
+.brand{font-size:13px;letter-spacing:3px;color:#9cefff}
+.status{
+ font-size:11px;color:#9cefff;border:1px solid #2b91ad88;
+ border-radius:20px;padding:7px 11px;background:#06132299
 }
-
-#label {
-  position: fixed;
-  top: 22px;
-  width: 100%;
-  text-align: center;
-  color: #b8efff;
-  font-size: 18px;
-  letter-spacing: 6px;
-  text-shadow: 0 0 18px #00aaff;
-  pointer-events: none;
-  z-index: 2;
+#reply{
+ align-self:center;max-width:88%;margin-bottom:9vh;
+ padding:10px 16px;border:1px solid #42dafa66;
+ border-radius:14px;background:#061322aa;color:#e9fbff;
+ text-align:center;font-size:14px;opacity:0;
+ transition:opacity .25s;box-shadow:0 0 22px #00cfff22
 }
-
-#status {
-  position: fixed;
-  bottom: 75px;
-  width: 100%;
-  text-align: center;
-  color: #7ddfff;
-  font-size: 11px;
-  letter-spacing: 2px;
-  pointer-events: none;
-  z-index: 2;
-}
-
-#sound {
-  position: fixed;
-  bottom: 22px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 12px 24px;
-  border: 1px solid #36cfff;
-  border-radius: 30px;
-  background: #071a2b;
-  color: #b8efff;
-  font-size: 13px;
-  box-shadow: 0 0 18px #0088cc66;
-  z-index: 3;
-}
-
-/* Floating reply: transparent text, no background */
-#reply-layer {
-  position: fixed;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  pointer-events: none;
-  z-index: 5;
-  overflow: hidden;
-}
-
-#reply-text {
-  max-width: 88%;
-  max-height: 55%;
-  overflow: hidden;
-  color: #e5faff;
-  font-size: clamp(15px, 3.5vw, 23px);
-  line-height: 1.65;
-  font-weight: 600;
-  text-align: center;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  direction: auto;
-  text-shadow:
-    0 0 5px #ffffff,
-    0 0 12px #35cfff,
-    0 0 25px #008cff,
-    0 0 42px #008cff;
-  opacity: 0;
-  transform: translateY(35px) scale(0.96);
-  transition: none;
-}
-
-#reply-text.visible {
-  animation: replyRise 7s ease-out forwards;
-}
-
-@keyframes replyRise {
-  0% {
-    opacity: 0;
-    transform: translateY(35px) scale(0.96);
-  }
-  10% {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-  72% {
-    opacity: 1;
-    transform: translateY(-35px) scale(1);
-  }
-  100% {
-    opacity: 0;
-    transform: translateY(-90px) scale(0.97);
-  }
-}
+#hint{font-size:10px;color:#6aa6b8;text-align:center;letter-spacing:1px}
+#video{position:fixed;width:1px;height:1px;opacity:.001}
 </style>
 </head>
 
 <body>
+<div id="stage"></div>
+<video id="video" autoplay playsinline muted></video>
 
-<div id="label">IDRICI AI</div>
-<div id="status">ELECTRIC CORE INITIALIZING</div>
-<button id="sound">⚡ تفعيل صوت الكهرباء</button>
-
-<div id="reply-layer" aria-live="polite">
-  <div id="reply-text"></div>
+<div id="hud">
+ <div class="top">
+  <div class="brand">IDRICI AI</div>
+  <div id="status" class="status">HOLOGRAM • READY</div>
+ </div>
+ <div id="reply"></div>
+ <div id="hint">HAND TRACKING • VOICE INTERFACE</div>
 </div>
 
-<script type="module">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r152/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.js" crossorigin="anonymous"></script>
 
-import * as THREE from
-'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+<script>
+(() => {
+const root=document.getElementById('stage');
+const status=document.getElementById('status');
 
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x02040c);
-scene.fog = new THREE.FogExp2(0x02040c, 0.035);
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(35,innerWidth/innerHeight,.1,100);
+camera.position.set(0,1.1,7.5);
 
-const camera = new THREE.PerspectiveCamera(
-  42,
-  innerWidth / innerHeight,
-  0.1,
-  100
-);
+const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+renderer.setClearColor(0x000000,0);
+root.appendChild(renderer.domElement);
 
-camera.position.set(0, 0, 8);
+scene.add(new THREE.AmbientLight(0x8bbcff,1.7));
 
-const renderer = new THREE.WebGLRenderer({
-  antialias: true,
-  powerPreference: "high-performance"
+const key=new THREE.PointLight(0x42dfff,3,12);
+key.position.set(2,3,4);
+scene.add(key);
+
+const violet=new THREE.PointLight(0x9b42ff,2,10);
+violet.position.set(-2,1,2);
+scene.add(violet);
+
+const human=new THREE.Group();
+scene.add(human);
+
+const cyan=new THREE.MeshBasicMaterial({
+ color:0x55eaff,wireframe:true,transparent:true,opacity:.42
 });
 
-renderer.setPixelRatio(Math.min(devicePixelRatio, 1.7));
-renderer.setSize(innerWidth, innerHeight);
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
+const glow=new THREE.MeshBasicMaterial({
+ color:0x9c6bff,transparent:true,opacity:.22
+});
 
-document.body.appendChild(renderer.domElement);
+const solid=new THREE.MeshPhongMaterial({
+ color:0x183e75,emissive:0x164b9c,
+ emissiveIntensity:1.1,transparent:true,
+ opacity:.30,shininess:90
+});
 
-scene.add(new THREE.AmbientLight(0x17466d, 1.5));
-
-const blueLight = new THREE.PointLight(0x00aaff, 7, 14);
-blueLight.position.set(0, 1, 3);
-scene.add(blueLight);
-
-const whiteLight = new THREE.PointLight(0xffffff, 3, 10);
-whiteLight.position.set(0, -1, 2);
-scene.add(whiteLight);
-
-// ENERGY CORE
-
-const energy = new THREE.Group();
-scene.add(energy);
-
-const core = new THREE.Mesh(
-  new THREE.SphereGeometry(0.52, 48, 48),
-  new THREE.MeshBasicMaterial({
-    color: 0x8cecff,
-    wireframe: true
-  })
-);
-
-energy.add(core);
-
-const innerCore = new THREE.Mesh(
-  new THREE.SphereGeometry(0.32, 40, 40),
-  new THREE.MeshBasicMaterial({
-    color: 0xffffff
-  })
-);
-
-energy.add(innerCore);
-
-const glow = new THREE.Mesh(
-  new THREE.SphereGeometry(0.68, 32, 32),
-  new THREE.MeshBasicMaterial({
-    color: 0x008cff,
-    transparent: true,
-    opacity: 0.10,
-    side: THREE.BackSide
-  })
-);
-
-energy.add(glow);
-
-// ELECTRIC PARTICLES
-
-const particleCount = 1400;
-const particlePositions = new Float32Array(particleCount * 3);
-
-for (let i = 0; i < particleCount; i++) {
-  const angle = Math.random() * Math.PI * 2;
-  const radius = 0.6 + Math.random() * 1.5;
-
-  particlePositions[i * 3] = Math.cos(angle) * radius;
-  particlePositions[i * 3 + 1] =
-    (Math.random() - 0.5) * 3.5;
-  particlePositions[i * 3 + 2] =
-    Math.sin(angle) * radius;
+function orb(parent,x,y,z,sx,sy,sz,mat){
+ const m=new THREE.Mesh(
+  new THREE.SphereGeometry(1,24,18),mat
+ );
+ m.position.set(x,y,z);
+ m.scale.set(sx,sy,sz);
+ parent.add(m);
+ return m;
 }
 
-const particleGeometry = new THREE.BufferGeometry();
+// الجسم
+orb(human,0,0,0,.68,.98,.34,solid);
+orb(human,0,0,0,.70,1,.36,cyan);
+orb(human,0,1.02,0,.19,.28,.18,glow);
 
-particleGeometry.setAttribute(
-  'position',
-  new THREE.BufferAttribute(particlePositions, 3)
-);
+// الرأس
+const headPivot=new THREE.Group();
+headPivot.position.set(0,1.42,0);
+human.add(headPivot);
 
-const particles = new THREE.Points(
-  particleGeometry,
-  new THREE.PointsMaterial({
-    color: 0x5bdfff,
-    size: 0.035,
-    transparent: true,
-    opacity: 0.9,
-    blending: THREE.AdditiveBlending
+orb(headPivot,0,.22,0,.43,.55,.38,solid);
+orb(headPivot,0,.22,0,.44,.56,.39,cyan);
+
+// خطوط الوجه الضوئية
+for(let i=0;i<5;i++){
+ const line=new THREE.Mesh(
+  new THREE.BoxGeometry(.48-i*.035,.012,.012),
+  new THREE.MeshBasicMaterial({
+   color:0x75eaff,transparent:true,opacity:.55
   })
-);
+ );
+ line.position.set(0,.42-i*.13,.36);
+ headPivot.add(line);
+}
 
+// الذراعان
+const arms=[];
+
+for(const side of [-1,1]){
+ const pivot=new THREE.Group();
+ pivot.position.set(side*.67,.72,0);
+ human.add(pivot);
+
+ orb(pivot,side*.22,-.38,0,.20,.52,.20,solid);
+ orb(pivot,side*.22,-.38,0,.205,.53,.205,cyan);
+ orb(pivot,side*.22,-.78,0,.16,.16,.16,glow);
+ orb(pivot,side*.22,-1.08,0,.14,.38,.14,cyan);
+ orb(pivot,side*.22,-1.42,.02,.17,.18,.12,glow);
+
+ arms.push({pivot,side});
+}
+
+// الشعر الطويل المتدفق
+const hairMat=new THREE.LineBasicMaterial({
+ color:0x9d74ff,transparent:true,opacity:.75
+});
+
+for(let i=0;i<17;i++){
+ const pts=[];
+ const x=-.36+i*.045;
+
+ for(let j=0;j<=18;j++){
+  const t=j/18;
+  pts.push(new THREE.Vector3(
+   x+Math.sin(t*5+i*.4)*(.035+t*.10),
+   .68-t*1.65,
+   -.12+Math.sin(t*3+i)*.04
+  ));
+ }
+
+ const curve=new THREE.CatmullRomCurve3(pts);
+
+ human.add(new THREE.Line(
+  new THREE.BufferGeometry().setFromPoints(curve.getPoints(32)),
+  hairMat
+ ));
+}
+
+// جسيمات الطاقة
+const particles=new THREE.Group();
 scene.add(particles);
 
-// ELECTRIC LIGHTNING
+for(let i=0;i<90;i++){
+ const p=orb(
+  particles,
+  (Math.random()-.5)*3,
+  (Math.random()-.5)*4.2,
+  (Math.random()-.5)*1.1,
+  .012,.012,.012,
+  new THREE.MeshBasicMaterial({
+   color:i%3?0x38dfff:0xb46aff
+  })
+ );
 
-const bolts = [];
+ p.userData={
+  phase:Math.random()*6.28,
+  baseY:p.position.y
+ };
+}
 
-function createBolt() {
-  const points = [];
+// شرارات الكهرباء
+const sparks=new THREE.Group();
+scene.add(sparks);
 
-  let x = (Math.random() - 0.5) * 1.4;
-  let y = (Math.random() - 0.5) * 1.4;
-  let z = (Math.random() - 0.5) * 0.8;
+function burst(){
+ sparks.clear();
 
-  for (let i = 0; i < 13; i++) {
-    points.push(new THREE.Vector3(x, y, z));
+ for(let i=0;i<34;i++){
+  const points=[new THREE.Vector3(0,0,0)];
+  let x=0,y=0,z=0;
 
-    x += (Math.random() - 0.5) * 0.42;
-    y += (Math.random() - 0.5) * 0.42;
-    z += (Math.random() - 0.5) * 0.3;
+  for(let j=0;j<4;j++){
+   x+=(Math.random()-.5)*.32;
+   y+=(Math.random()-.5)*.32;
+   z+=(Math.random()-.5)*.22;
+   points.push(new THREE.Vector3(x,y,z));
   }
 
-  const geometry = new THREE.BufferGeometry()
-    .setFromPoints(points);
-
-  const material = new THREE.LineBasicMaterial({
-    color: Math.random() > 0.5 ? 0x9ceeff : 0xffffff,
-    transparent: true,
-    opacity: 0.95,
-    blending: THREE.AdditiveBlending
+  const material=new THREE.LineBasicMaterial({
+   color:i%2?0x65efff:0xc18aff,
+   transparent:true,opacity:1
   });
 
-  const bolt = new THREE.Line(geometry, material);
+  const line=new THREE.Line(
+   new THREE.BufferGeometry().setFromPoints(points),
+   material
+  );
 
-  scene.add(bolt);
+  line.position.set(
+   (Math.random()-.5)*1.1,
+   (Math.random()-.5)*2.5,
+   (Math.random()-.5)*.5
+  );
 
-  bolts.push({
-    object: bolt,
-    life: 0,
-    duration: 0.12 + Math.random() * 0.25
-  });
+  sparks.add(line);
+ }
+
+ sparks.userData.until=performance.now()+650;
 }
 
-function updateBolts(delta) {
-  for (let i = bolts.length - 1; i >= 0; i--) {
-    const bolt = bolts[i];
+let handX=0;
+let handY=0;
+let lastPinch=0;
+let vision=null;
+let lastVideoTime=-1;
 
-    bolt.life += delta;
+const video=document.getElementById('video');
 
-    bolt.object.material.opacity =
-      Math.max(0, 1 - bolt.life / bolt.duration);
-
-    if (bolt.life >= bolt.duration) {
-      scene.remove(bolt.object);
-      bolt.object.geometry.dispose();
-      bolt.object.material.dispose();
-      bolts.splice(i, 1);
-    }
+// تشغيل الكاميرا وتتبع اليد
+async function startHands(){
+ try{
+  if(!navigator.mediaDevices?.getUserMedia){
+   throw new Error('Camera API unavailable');
   }
 
-  if (Math.random() < 0.55) {
-    createBolt();
-  }
-}
-
-// ELECTRIC HUMANOID
-
-const humanoid = new THREE.Group();
-scene.add(humanoid);
-
-const electricMaterial = new THREE.MeshBasicMaterial({
-  color: 0x46cfff,
-  wireframe: true,
-  transparent: true,
-  opacity: 0.85
-});
-
-function bodyPart(x, y, z, sx, sy, sz) {
-  const mesh = new THREE.Mesh(
-    new THREE.IcosahedronGeometry(1, 3),
-    electricMaterial
-  );
-
-  mesh.position.set(x, y, z);
-  mesh.scale.set(sx, sy, sz);
-
-  humanoid.add(mesh);
-
-  return mesh;
-}
-
-// Head, neck and chest
-
-const head = bodyPart(0, 1.5, 0, 0.38, 0.46, 0.32);
-const neck = bodyPart(0, 0.96, 0, 0.15, 0.25, 0.15);
-const chest = bodyPart(0, 0.12, 0, 0.73, 0.82, 0.34);
-
-// Shoulders and arms
-
-const hands = [];
-
-for (const side of [-1, 1]) {
-  const shoulder = bodyPart(
-    side * 0.78, 0.52, 0,
-    0.32, 0.28, 0.27
-  );
-
-  const upperArm = bodyPart(
-    side * 1.05, 0.05, 0,
-    0.20, 0.48, 0.18
-  );
-
-  const forearm = bodyPart(
-    side * 1.28, -0.52, 0,
-    0.15, 0.42, 0.15
-  );
-
-  const hand = bodyPart(
-    side * 1.34, -1.0, 0,
-    0.20, 0.23, 0.12
-  );
-
-  hands.push(hand);
-
-  for (let f = 0; f < 5; f++) {
-    const finger = bodyPart(
-      side * (1.20 + f * 0.07),
-      -1.28 - Math.sin(f * 0.6) * 0.05,
-      0,
-      0.035,
-      0.15,
-      0.035
-    );
-
-    finger.rotation.z = side * -0.12;
-  }
-}
-
-// BODY ELECTRIC THREADS
-
-const bodyBolts = [];
-
-function createBodyThread() {
-  const points = [];
-
-  const start = new THREE.Vector3(
-    (Math.random() - 0.5) * 1.5,
-    (Math.random() - 0.5) * 2.6,
-    0.15
-  );
-
-  let p = start.clone();
-
-  for (let i = 0; i < 9; i++) {
-    points.push(p.clone());
-
-    p = p.clone().add(
-      new THREE.Vector3(
-        (Math.random() - 0.5) * 0.22,
-        (Math.random() - 0.5) * 0.3,
-        (Math.random() - 0.5) * 0.15
-      )
-    );
-  }
-
-  const line = new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints(points),
-    new THREE.LineBasicMaterial({
-      color: 0x8ceeff,
-      transparent: true,
-      opacity: 0.85,
-      blending: THREE.AdditiveBlending
-    })
-  );
-
-  humanoid.add(line);
-
-  bodyBolts.push(line);
-}
-
-for (let i = 0; i < 45; i++) {
-  createBodyThread();
-}
-
-// REPLY DISPLAY API
-
-const replyElement = document.getElementById('reply-text');
-let replyAnimationTimer = null;
-
-function showReply(text) {
-  const safeText = String(text ?? '').trim();
-
-  if (!safeText) return;
-
-  replyElement.textContent =
-    safeText.length > 650
-      ? safeText.substring(0, 650) + '…'
-      : safeText;
-
-  // Restart the animation when a new reply arrives.
-  replyElement.classList.remove('visible');
-
-  if (replyAnimationTimer) {
-    clearTimeout(replyAnimationTimer);
-  }
-
-  // Force the browser to restart the CSS animation.
-  void replyElement.offsetWidth;
-
-  replyElement.classList.add('visible');
-
-  replyAnimationTimer = setTimeout(() => {
-    replyElement.classList.remove('visible');
-  }, 7200);
-}
-
-function clearReply() {
-  if (replyAnimationTimer) {
-    clearTimeout(replyAnimationTimer);
-  }
-
-  replyElement.classList.remove('visible');
-  replyElement.textContent = '';
-}
-
-// Public interface called by Flutter WebView.
-window.Idrici3D = Object.freeze({
-  showReply,
-  clearReply
-});
-
-// SOUND SYSTEM
-
-let audioContext = null;
-let soundEnabled = false;
-let soundTimer = null;
-
-function playSpark() {
-  if (!audioContext || !soundEnabled) return;
-
-  const now = audioContext.currentTime;
-
-  const oscillator = audioContext.createOscillator();
-  const gain = audioContext.createGain();
-
-  oscillator.type = 'sawtooth';
-
-  oscillator.frequency.setValueAtTime(
-    1800 + Math.random() * 1800,
-    now
-  );
-
-  oscillator.frequency.exponentialRampToValueAtTime(
-    250,
-    now + 0.09
-  );
-
-  gain.gain.setValueAtTime(0.0001, now);
-  gain.gain.exponentialRampToValueAtTime(0.045, now + 0.008);
-  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
-
-  oscillator.connect(gain);
-  gain.connect(audioContext.destination);
-
-  oscillator.start(now);
-  oscillator.stop(now + 0.13);
-}
-
-document.getElementById('sound').addEventListener('click', async () => {
-  if (!audioContext) {
-    audioContext = new (
-      window.AudioContext || window.webkitAudioContext
-    )();
-  }
-
-  await audioContext.resume();
-
-  soundEnabled = !soundEnabled;
-
-  document.getElementById('sound').textContent =
-    soundEnabled
-      ? '🔊 صوت الكهرباء يعمل'
-      : '⚡ تفعيل صوت الكهرباء';
-
-  if (soundTimer) clearInterval(soundTimer);
-
-  if (soundEnabled) {
-    playSpark();
-
-    soundTimer = setInterval(() => {
-      if (Math.random() > 0.35) playSpark();
-    }, 220);
-  }
-});
-
-// ANIMATION
-
-const clock = new THREE.Clock();
-
-function animate() {
-  requestAnimationFrame(animate);
-
-  const delta = Math.min(clock.getDelta(), 0.04);
-  const t = clock.elapsedTime;
-
-  core.rotation.x += 0.008;
-  core.rotation.y += 0.013;
-
-  innerCore.scale.setScalar(
-    1 + Math.sin(t * 4) * 0.09
-  );
-
-  glow.scale.setScalar(
-    1 + Math.sin(t * 3) * 0.12
-  );
-
-  particles.rotation.y = t * 0.18;
-  particles.rotation.x = Math.sin(t * 0.3) * 0.12;
-
-  energy.position.y = Math.sin(t * 1.7) * 0.10;
-
-  updateBolts(delta);
-
-  // Gradual visual reveal.
-  const reveal = Math.min(1, t / 9);
-  const smooth = reveal * reveal * (3 - 2 * reveal);
-
-  humanoid.scale.setScalar(smooth);
-
-  humanoid.position.y =
-    -0.2 + Math.sin(t * 1.3) * 0.035;
-
-  humanoid.rotation.y =
-    Math.sin(t * 0.45) * 0.10;
-
-  head.rotation.y = Math.sin(t * 0.7) * 0.08;
-  head.rotation.x = Math.sin(t * 0.9) * 0.035;
-
-  hands.forEach((hand, i) => {
-    hand.rotation.z =
-      Math.sin(t * 1.5 + i) * 0.08;
+  const stream=await navigator.mediaDevices.getUserMedia({
+   video:{
+    facingMode:'user',
+    width:640,
+    height:480
+   },
+   audio:false
   });
 
-  bodyBolts.forEach((line, i) => {
-    line.material.opacity =
-      0.25 + Math.abs(Math.sin(t * 4 + i)) * 0.7;
-  });
+  video.srcObject=stream;
+  await video.play();
 
-  blueLight.intensity =
-    5 + Math.sin(t * 5) * 2;
+  const visionFiles=await FilesetResolver.forVisionTasks(
+   'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+  );
 
-  renderer.render(scene, camera);
+  vision=await HandLandmarker.createFromOptions(
+   visionFiles,
+   {
+    baseOptions:{
+     modelAssetPath:
+     'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+     delegate:'GPU'
+    },
+    runningMode:'VIDEO',
+    numHands:1
+   }
+  );
+
+  status.textContent='CAMERA • TRACKING';
+  track();
+
+ }catch(e){
+  status.textContent='HOLOGRAM • CAMERA OFF';
+  console.warn('Hand tracking unavailable:',e);
+ }
+}
+
+function track(){
+ if(
+  vision &&
+  video.readyState>=2 &&
+  video.currentTime!==lastVideoTime
+ ){
+  lastVideoTime=video.currentTime;
+
+  const result=vision.detectForVideo(
+   video,performance.now()
+  );
+
+  if(result.landmarks?.length){
+   const lm=result.landmarks[0];
+   const index=lm[8];
+   const thumb=lm[4];
+
+   handX=(.5-index.x)*2.2;
+   handY=(.5-index.y)*2.0;
+
+   // تقريب إشارة ضم الإبهام والسبابة
+   const pinch=Math.hypot(
+    index.x-thumb.x,
+    index.y-thumb.y
+   );
+
+   const now=performance.now();
+
+   if(pinch<.035 && now-lastPinch>1100){
+    burst();
+    lastPinch=now;
+   }
+  }
+ }
+
+ requestAnimationFrame(track);
+}
+
+// الحركة المستمرة
+const clock=new THREE.Clock();
+
+function animate(){
+ requestAnimationFrame(animate);
+
+ const t=clock.getElapsedTime();
+
+ human.position.y=Math.sin(t*1.25)*.045;
+
+ human.rotation.y=
+  Math.sin(t*.55)*.10+handX*.16;
+
+ human.rotation.x=THREE.MathUtils.lerp(
+  human.rotation.x,handY*.10,.035
+ );
+
+ headPivot.rotation.y=THREE.MathUtils.lerp(
+  headPivot.rotation.y,handX*.42,.055
+ );
+
+ headPivot.rotation.x=THREE.MathUtils.lerp(
+  headPivot.rotation.x,
+  -handY*.20+Math.sin(t*.8)*.025,
+  .05
+ );
+
+ arms.forEach(a=>{
+  a.pivot.rotation.z=THREE.MathUtils.lerp(
+   a.pivot.rotation.z,
+   a.side===1?-.10+handX*.12:.10+handX*.12,
+   .025
+  );
+ });
+
+ particles.children.forEach(p=>{
+  p.position.y=
+   p.userData.baseY+
+   Math.sin(t*1.4+p.userData.phase)*.12;
+
+  p.rotation.y=t*.2;
+ });
+
+ if(performance.now()>(sparks.userData.until||0)){
+  sparks.clear();
+ }
+
+ renderer.render(scene,camera);
 }
 
 animate();
+startHands();
 
-// RESIZE
-
-window.addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
-  camera.updateProjectionMatrix();
-
-  renderer.setSize(innerWidth, innerHeight);
+// تغيير حجم الشاشة
+addEventListener('resize',()=>{
+ camera.aspect=innerWidth/innerHeight;
+ camera.updateProjectionMatrix();
+ renderer.setSize(innerWidth,innerHeight);
 });
 
-document.getElementById('status').textContent =
-  'IDRICI AI • ELECTRIC LIFE SYSTEM';
+// الربط مع Flutter
+window.Idrici3D={
+ showReply(text){
+  const el=document.getElementById('reply');
+  el.textContent=String(text??'');
+  el.style.opacity='1';
+ },
 
+ clearReply(){
+  document.getElementById('reply').style.opacity='0';
+ },
+
+ setSpeaking(value){
+  human.scale.y=value?1.015:1;
+ },
+
+ triggerSnap:burst
+};
+
+})();
 </script>
 </body>
 </html>
