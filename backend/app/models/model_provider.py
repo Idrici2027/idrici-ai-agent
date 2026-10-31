@@ -1,4 +1,3 @@
- 
 import asyncio
 import json
 import os
@@ -6,7 +5,17 @@ from typing import Any, Protocol
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from google import genai
+IDENTITY_INSTRUCTION = (
+    "You are Idrici AI, an AI assistant created for the Idrici AI project. "
+    "Your name is Idrici AI. "
+    "If asked your name, clearly say: I am Idrici AI. "
+    "If asked who you are, introduce yourself as Idrici AI. "
+    "Answer in the user's language whenever possible. "
+    "Be helpful, accurate, and clear. "
+    "Never claim to have completed real-world actions unless you actually have."
+)
+
+FALLBACK_REPLY = "I am Idrici AI, but I could not generate a response."
 
 
 class ModelProvider(Protocol):
@@ -52,18 +61,8 @@ class GroqModelProvider:
         messages: list[dict[str, str]],
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        identity_instruction = (
-            "You are Idrici AI, an AI assistant created for the Idrici AI project. "
-            "Your name is Idrici AI. "
-            "If asked your name, clearly say: I am Idrici AI. "
-            "If asked who you are, introduce yourself as Idrici AI. "
-            "Answer in the user's language whenever possible. "
-            "Be helpful, accurate, and clear. "
-            "Never claim to have completed real-world actions unless you actually have."
-        )
-
         api_messages = [
-            {"role": "system", "content": identity_instruction}
+            {"role": "system", "content": IDENTITY_INSTRUCTION}
         ]
 
         for message in messages:
@@ -113,22 +112,35 @@ class GroqModelProvider:
         if not choices:
             raise RuntimeError("Groq returned no response choices")
 
-        reply = choices[0].get("message", {}).get("content", "")
+        reply = (choices[0].get("message") or {}).get("content") or ""
 
         return {
-            "text": reply or "I am Idrici AI, but I could not generate a response.",
+            "text": reply or FALLBACK_REPLY,
             "tool_calls": [],
             "provider": "groq",
         }
 
 
 class GeminiModelProvider:
-    """Google Gemini model provider retained as an alternative."""
+    """Google Gemini model provider retained as an alternative.
+
+    The google-genai package is imported only when this provider is
+    created, so the Groq provider keeps working even if the package
+    is not installed.
+    """
 
     def __init__(self) -> None:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY is not configured")
+
+        try:
+            from google import genai
+        except ImportError as exc:
+            raise RuntimeError(
+                "google-genai is not installed. "
+                "Run: pip install google-genai"
+            ) from exc
 
         self.client = genai.Client(api_key=api_key)
         self.model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
@@ -138,22 +150,12 @@ class GeminiModelProvider:
         messages: list[dict[str, str]],
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        identity_instruction = (
-            "You are Idrici AI, an AI assistant created for the Idrici AI project. "
-            "Your name is Idrici AI. "
-            "If asked your name, clearly say: I am Idrici AI. "
-            "If asked who you are, introduce yourself as Idrici AI. "
-            "Answer in the user's language whenever possible. "
-            "Be helpful, accurate, and clear. "
-            "Never claim to have completed real-world actions unless you actually have."
-        )
-
         conversation = "\n\n".join(
             f"{message.get('role', 'user')}: {message.get('content', '')}"
             for message in messages
         )
 
-        prompt = f"{identity_instruction}\n\nConversation:\n{conversation}"
+        prompt = f"{IDENTITY_INSTRUCTION}\n\nConversation:\n{conversation}"
 
         response = await asyncio.to_thread(
             self.client.models.generate_content,
@@ -162,7 +164,7 @@ class GeminiModelProvider:
         )
 
         return {
-            "text": response.text or "I am Idrici AI, but I could not generate a response.",
+            "text": response.text or FALLBACK_REPLY,
             "tool_calls": [],
             "provider": "gemini",
         }
