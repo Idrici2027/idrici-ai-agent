@@ -1,4 +1,3 @@
-
 name: Build Idrici AI Android APK
 
 on:
@@ -30,10 +29,11 @@ jobs:
       - name: Copy Idrici AI application files
         run: |
           cp android_app/pubspec.yaml build_app/pubspec.yaml
-          mkdir -p build_app/lib
-          cp android_app/lib/main.dart build_app/lib/main.dart
+          rm -rf build_app/lib
+          cp -r android_app/lib build_app/lib
+          cp -r android_app/assets build_app/assets
 
-      - name: Add Android Internet permission
+      - name: Add Android permissions and speech services
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -42,20 +42,61 @@ jobs:
               "build_app/android/app/src/main/AndroidManifest.xml"
           )
           content = manifest.read_text()
-          permission = '    <uses-permission android:name="android.permission.INTERNET"/>'
 
-          if "android.permission.INTERNET" not in content:
-              content = content.replace(
-                  "<application",
-                  permission + "\n    <application",
-                  1,
+          permissions = [
+              "android.permission.INTERNET",
+              "android.permission.RECORD_AUDIO",
+              "android.permission.MODIFY_AUDIO_SETTINGS",
+          ]
+          missing = [p for p in permissions if p not in content]
+          if missing:
+              lines = "".join(
+                  f'    <uses-permission android:name="{p}"/>\n'
+                  for p in missing
               )
-              manifest.write_text(content)
+              content = content.replace(
+                  "<application", lines + "    <application", 1
+              )
+
+          # Android 11+ must declare which services the app talks to,
+          # otherwise speech recognition and text-to-speech are invisible.
+          intents = ""
+          if "android.speech.RecognitionService" not in content:
+              intents += (
+                  '        <intent>\n'
+                  '            <action android:name="android.speech.RecognitionService"/>\n'
+                  '        </intent>\n'
+              )
+          if "android.intent.action.TTS_SERVICE" not in content:
+              intents += (
+                  '        <intent>\n'
+                  '            <action android:name="android.intent.action.TTS_SERVICE"/>\n'
+                  '        </intent>\n'
+              )
+
+          if intents:
+              if "<queries>" in content:
+                  content = content.replace(
+                      "<queries>", "<queries>\n" + intents, 1
+                  )
+              else:
+                  content = content.replace(
+                      "<application",
+                      "    <queries>\n" + intents + "    </queries>\n    <application",
+                      1,
+                  )
+
+          manifest.write_text(content)
+          print(content)
           PY
 
       - name: Get Flutter dependencies
         working-directory: build_app
         run: flutter pub get
+
+      - name: Analyze Dart code
+        working-directory: build_app
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
       - name: Build release APK
         working-directory: build_app
