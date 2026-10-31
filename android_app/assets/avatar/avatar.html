@@ -14,7 +14,31 @@
     -webkit-user-select: none;
     user-select: none;
   }
-  canvas { display: block; width: 100%; height: 100%; }
+  canvas#c { display: block; width: 100%; height: 100%; }
+  /* hidden camera source; kept 1px so the browser still decodes frames */
+  #cam {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 1px;
+    height: 1px;
+    opacity: 0.01;
+    pointer-events: none;
+  }
+  /* small mirrored selfie preview, shown only while tracking is on */
+  #preview {
+    display: none;
+    position: absolute;
+    left: 8px;
+    bottom: 8px;
+    width: 84px;
+    height: 112px;
+    border-radius: 14px;
+    border: 1px solid rgba(84, 214, 176, 0.55);
+    transform: scaleX(-1);
+    opacity: 0.92;
+    pointer-events: none;
+  }
   #fallback {
     display: none;
     position: absolute;
@@ -30,6 +54,8 @@
 </head>
 <body>
 <canvas id="c"></canvas>
+<video id="cam" playsinline muted autoplay></video>
+<canvas id="preview" width="168" height="224"></canvas>
 <div id="fallback">تعذّر تحميل المجسم ثلاثي الأبعاد.<br>تحقق من اتصال الإنترنت ثم أعد فتح التطبيق.</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -42,6 +68,12 @@
  *   avatar.setLevel(0..1)   microphone loudness while listening
  *   avatar.lookAt(x, y)     -1..1, x right, y up. Gaze returns to idle
  *                           wandering 2.5 s after the last call.
+ *   avatar.startTracking()  opens the selfie camera and follows your hand
+ *                           (or your face when no hand is visible).
+ *                           Runs fully on-device; frames are never sent
+ *                           anywhere. Reports back through the Flutter
+ *                           channel "Tracker".
+ *   avatar.stopTracking()   releases the camera.
  */
 (function () {
   'use strict';
@@ -215,6 +247,7 @@
     look: { x: 0, y: 0 },
     lookStamp: -1e9,
     lookSmooth: { x: 0, y: 0 },
+    seenStamp: -1e9,
     eyeOpen: 1,
     blinking: false,
     blinkT: 0,
@@ -247,6 +280,209 @@
   }
   window.addEventListener('pointermove', onPointer, { passive: true });
   window.addEventListener('pointerdown', onPointer, { passive: true });
+
+  // ---------- camera tracking (hand + face, on-device) ----------
+  var MP_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+  var MODEL_BASE = 'https://storage.googleapis.com/mediapipe-models/';
+  var FACE_MODEL = MODEL_BASE +
+      'face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+  var HAND_MODEL = MODEL_BASE +
+      'hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+
+  var cam = document.getElementById('cam');
+  var preview = document.getElementById('preview');
+  var pctx = preview.getContext('2d');
+
+  var track = {
+    wantOn: false,
+    running: false,
+    starting: false,
+    stream: null,
+    face: null,
+    hand: null,
+    raf: 0,
+    lastRun: 0,
+    lastTime: -1,
+    n: 0,
+    handStamp: -1e9,
+    presence: ''
+  };
+
+  function notify(msg) {
+    try {
+      if (window.Tracker && window.Tracker.postMessage) {
+        window.Tracker.postMessage(String(msg));
+      }
+    } catch (e) { /* the page also works outside Flutter */ }
+  }
+
+  function setPresence(p) {
+    if (p !== track.presence) {
+      track.presence = p;
+      notify('seen:' + p);
+    }
+  }
+
+  // Selfie frames are not mirrored: someone on the user's right appears on
+  // the left of the image, so x is flipped. y is flipped too (up = +1).
+  function aim(p, gain) {
+    window.avatar.lookAt(
+      clamp((0.5 - p.x) * 2 * gain, -1, 1),
+      clamp((0.5 - p.y) * 2 * gain, -1, 1)
+    );
+  }
+
+  async function loadModels() {
+    var vision = await import(MP_BASE + '/vision_bundle.mjs');
+    var files = await vision.FilesetResolver.forVisionTasks(MP_BASE + '/wasm');
+
+    async function make(Cls, model, extra) {
+      var opts = Object.assign({
+        baseOptions: { modelAssetPath: model, delegate: 'GPU' },
+        runningMode: 'VIDEO'
+      }, extra);
+      try {
+        return await Cls.createFromOptions(files, opts);
+      } catch (e) {
+        // some WebViews have no usable GPU delegate; fall back to the CPU
+        opts.baseOptions.delegate = 'CPU';
+        return await Cls.createFromOptions(files, opts);
+      }
+    }
+
+    track.hand = await make(vision.HandLandmarker, HAND_MODEL, { numHands: 1 });
+    track.face = await make(vision.FaceLandmarker, FACE_MODEL, { numFaces: 1 });
+  }
+
+  function drawPreview(hand, face) {
+    var cw = preview.width, ch = preview.height;
+    var vw = cam.videoWidth, vh = cam.videoHeight;
+    if (!vw || !vh) { return; }
+    var s = Math.max(cw / vw, ch / vh);
+    var ox = (cw - vw * s) / 2, oy = (ch - vh * s) / 2;
+    pctx.drawImage(cam, ox, oy, vw * s, vh * s);
+
+    function dot(p, r, color) {
+      pctx.beginPath();
+      pctx.arc(p.x * vw * s + ox, p.y * vh * s + oy, r, 0, Math.PI * 2);
+      pctx.fillStyle = color;
+      pctx.fill();
+    }
+    if (hand) {
+      for (var i = 0; i < hand.length; i++) {
+        dot(hand[i], i === 9 ? 5 : 2.5, i === 9 ? '#ffd166' : '#54d6b0');
+      }
+    }
+    if (face) { dot(face[1], 4, '#6ee7ff'); }
+  }
+
+  function tick() {
+    if (!track.running) { return; }
+    track.raf = requestAnimationFrame(tick);
+
+    var now = performance.now();
+    // ~20 detections per second, and only for new camera frames
+    if (cam.readyState < 2 || now - track.lastRun < 50 ||
+        cam.currentTime === track.lastTime) { return; }
+    track.lastRun = now;
+    track.lastTime = cam.currentTime;
+    track.n++;
+
+    var hand = null, face = null;
+    try {
+      var hr = track.hand.detectForVideo(cam, now);
+      if (hr && hr.landmarks && hr.landmarks.length) { hand = hr.landmarks[0]; }
+
+      // the face is only needed when no hand is visible; run it every
+      // other frame to keep the phone cool
+      if (!hand && track.n % 2 === 0) {
+        var fr = track.face.detectForVideo(cam, now);
+        if (fr && fr.faceLandmarks && fr.faceLandmarks.length) {
+          face = fr.faceLandmarks[0];
+        }
+      }
+    } catch (e) {
+      return; // skip a bad frame
+    }
+
+    if (hand) {
+      track.handStamp = now;
+      S.seenStamp = now;
+      aim(hand[9], 1.7);           // landmark 9 = middle of the palm
+      setPresence('hand');
+    } else if (face) {
+      S.seenStamp = now;
+      aim(face[1], 1.4);           // landmark 1 = tip of the nose
+      setPresence('face');
+    } else if (now - track.handStamp > 500 &&
+               now - S.seenStamp > 800 && track.n % 2 === 0) {
+      setPresence('none');
+    }
+
+    drawPreview(hand, face);
+  }
+
+  function stopTracking(silent) {
+    track.wantOn = false;
+    track.running = false;
+    cancelAnimationFrame(track.raf);
+    if (track.stream) {
+      track.stream.getTracks().forEach(function (tr) { tr.stop(); });
+      track.stream = null;
+    }
+    cam.srcObject = null;
+    preview.style.display = 'none';
+    track.presence = '';
+    if (!silent) { notify('stopped'); }
+  }
+
+  async function startTracking() {
+    if (track.running || track.starting) { return; }
+    track.starting = true;
+    track.wantOn = true;
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw { name: 'CameraUnsupported' };
+      }
+      notify('loading');
+
+      // models first, so the camera light only turns on when we can use it
+      if (!track.hand || !track.face) { await loadModels(); }
+      if (!track.wantOn) { return; }
+
+      var stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'user',
+          width: { ideal: 480 },
+          height: { ideal: 640 }
+        },
+        audio: false
+      });
+      if (!track.wantOn) {
+        stream.getTracks().forEach(function (tr) { tr.stop(); });
+        return;
+      }
+
+      cam.srcObject = stream;
+      await cam.play();
+      track.stream = stream;
+      track.running = true;
+      track.lastTime = -1;
+      preview.style.display = 'block';
+      notify('started');
+      tick();
+    } catch (e) {
+      stopTracking(true);
+      var name = (e && (e.name || e.message)) || 'unknown';
+      notify('error:' + name);
+    } finally {
+      track.starting = false;
+    }
+  }
+
+  window.avatar.startTracking = function () { startTracking(); };
+  window.avatar.stopTracking = function () { stopTracking(false); };
+  window.addEventListener('pagehide', function () { stopTracking(true); });
 
   // ---------- layout ----------
   function resize() {
@@ -297,6 +533,11 @@
     // ears: perk up when listening, droop when thinking, wiggle when speaking
     var earBase = isL ? 0.05 : (isT ? 0.75 : 0.35);
     var earScaleY = isL ? 1.18 : (isT ? 0.85 : 1.0);
+    // ears perk up while the camera sees a hand or a face
+    if ((performance.now() - S.seenStamp) < 600 && !isL && !isT) {
+      earBase = 0.12;
+      earScaleY = 1.1;
+    }
     var earRateX = isS ? 5 : 1.3;
     var earAmp = isS ? 0.06 : 0.03;
     var listenTwitch = isL ? S.levelSmooth * 0.35 : 0;
