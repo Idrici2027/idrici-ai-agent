@@ -482,6 +482,22 @@
 
   window.avatar.startTracking = function () { startTracking(); };
   window.avatar.stopTracking = function () { stopTracking(false); };
+
+  // One still frame for the AI: a small JPEG (longest side 512 px) as bare
+  // base64, or '' when the camera is off. Flutter reads the return value.
+  window.avatar.captureFrame = function () {
+    try {
+      if (!track.running || !cam.videoWidth || !cam.videoHeight) { return ''; }
+      var scale = Math.min(1, 512 / Math.max(cam.videoWidth, cam.videoHeight));
+      var c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(cam.videoWidth * scale));
+      c.height = Math.max(1, Math.round(cam.videoHeight * scale));
+      c.getContext('2d').drawImage(cam, 0, 0, c.width, c.height);
+      return c.toDataURL('image/jpeg', 0.7).split(',')[1] || '';
+    } catch (e) {
+      return '';
+    }
+  };
   window.addEventListener('pagehide', function () { stopTracking(true); });
 
   // ---------- layout ----------
