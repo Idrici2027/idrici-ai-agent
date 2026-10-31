@@ -106,6 +106,23 @@ class AvatarController {
     tracking.value = TrackingStatus.off;
   }
 
+  /// Grabs one small JPEG from the selfie camera (bare base64), or null when
+  /// the camera is off or no frame is available yet.
+  Future<String?> captureFrame() async {
+    if (!_ready || tracking.value != TrackingStatus.on) return null;
+    try {
+      final result = await web.runJavaScriptReturningResult(
+        'window.avatar.captureFrame()',
+      );
+      // Android returns strings JSON-quoted. Base64 never contains quotes
+      // or backslashes, so stripping them is safe.
+      final frame = result.toString().replaceAll('"', '').replaceAll(r'\', '');
+      return frame.length > 200 ? frame : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   void _fail(String message) {
     trackingError = message;
     tracking.value = TrackingStatus.error;
