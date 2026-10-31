@@ -1,8 +1,7 @@
-
 name: idrici_ai
 description: Idrici AI Android application
 publish_to: 'none'
-version: 0.1.0+1
+version: 0.2.0+2
 
 environment:
   sdk: '>=3.4.0 <4.0.0'
@@ -12,6 +11,8 @@ dependencies:
     sdk: flutter
   http: ^1.2.2
   webview_flutter: ^4.10.0
+  speech_to_text: ^7.0.0
+  flutter_tts: ^4.2.0
 
 dev_dependencies:
   flutter_test:
@@ -20,3 +21,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/avatar/
