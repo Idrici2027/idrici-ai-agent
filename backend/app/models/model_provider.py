@@ -15,7 +15,46 @@ IDENTITY_INSTRUCTION = (
     "Never claim to have completed real-world actions unless you actually have."
 )
 
+VISION_INSTRUCTION = (
+    "The user attached a live photo taken just now by their phone's "
+    "front camera, so you can see them. Use it naturally when it is "
+    "relevant to their message (for example: what they are holding, "
+    "pointing at, wearing, or doing). Describe only what is actually "
+    "visible, never identify anyone from their face, and say so if the "
+    "image is too dark or unclear."
+)
+
 FALLBACK_REPLY = "I am Idrici AI, but I could not generate a response."
+
+# A message's content is either plain text or, when a camera frame is
+# attached, an OpenAI-style list of parts:
+#   [{"type": "text", "text": "..."},
+#    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}]
+Content = str | list[dict[str, Any]]
+
+
+def split_content(content: Any) -> tuple[str, str | None]:
+    """Returns (text, base64 image or None) for a message's content."""
+    if isinstance(content, str):
+        return content, None
+
+    texts: list[str] = []
+    image: str | None = None
+    for part in content or []:
+        if part.get("type") == "text":
+            texts.append(part.get("text", ""))
+        elif part.get("type") == "image_url":
+            url = (part.get("image_url") or {}).get("url", "")
+            if url.startswith("data:") and "," in url:
+                image = url.split(",", 1)[1]
+    return "\n".join(texts), image
+
+
+def has_image(messages: list[dict[str, Any]]) -> bool:
+    return any(
+        split_content(message.get("content", ""))[1] is not None
+        for message in messages
+    )
 
 
 class ModelProvider(Protocol):
@@ -23,7 +62,7 @@ class ModelProvider(Protocol):
 
     async def generate(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         ...
@@ -34,12 +73,15 @@ class MockModelProvider:
 
     async def generate(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        last_message = messages[-1]["content"] if messages else ""
+        last_text, image = split_content(
+            messages[-1]["content"] if messages else ""
+        )
+        suffix = " [image received]" if image else ""
         return {
-            "text": f"Idrici mock response: {last_message}",
+            "text": f"Idrici mock response: {last_text}{suffix}",
             "tool_calls": [],
             "provider": "mock",
         }
@@ -54,15 +96,26 @@ class GroqModelProvider:
             raise RuntimeError("GROQ_API_KEY is not configured")
 
         self.model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+        # Text-only models cannot read images, so requests that carry a
+        # camera frame go to a vision model. Override with the
+        # GROQ_VISION_MODEL environment variable if Groq renames it.
+        self.vision_model = os.getenv(
+            "GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"
+        )
         self.api_url = "https://api.groq.com/openai/v1/chat/completions"
 
     async def generate(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        with_image = has_image(messages)
+        system_prompt = IDENTITY_INSTRUCTION
+        if with_image:
+            system_prompt = f"{IDENTITY_INSTRUCTION} {VISION_INSTRUCTION}"
+
         api_messages = [
-            {"role": "system", "content": IDENTITY_INSTRUCTION}
+            {"role": "system", "content": system_prompt}
         ]
 
         for message in messages:
@@ -76,7 +129,7 @@ class GroqModelProvider:
             })
 
         payload = json.dumps({
-            "model": self.model,
+            "model": self.vision_model if with_image else self.model,
             "messages": api_messages,
             "temperature": 0.7,
         }).encode("utf-8")
@@ -147,20 +200,40 @@ class GeminiModelProvider:
 
     async def generate(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        conversation = "\n\n".join(
-            f"{message.get('role', 'user')}: {message.get('content', '')}"
-            for message in messages
-        )
+        lines: list[str] = []
+        image_b64: str | None = None
+        for message in messages:
+            text, image = split_content(message.get("content", ""))
+            image_b64 = image or image_b64
+            lines.append(f"{message.get('role', 'user')}: {text}")
 
-        prompt = f"{IDENTITY_INSTRUCTION}\n\nConversation:\n{conversation}"
+        instruction = IDENTITY_INSTRUCTION
+        if image_b64:
+            instruction = f"{IDENTITY_INSTRUCTION} {VISION_INSTRUCTION}"
+
+        prompt = f"{instruction}\n\nConversation:\n" + "\n\n".join(lines)
+
+        contents: Any = prompt
+        if image_b64:
+            import base64
+
+            from google.genai import types
+
+            contents = [
+                prompt,
+                types.Part.from_bytes(
+                    data=base64.b64decode(image_b64),
+                    mime_type="image/jpeg",
+                ),
+            ]
 
         response = await asyncio.to_thread(
             self.client.models.generate_content,
             model=self.model,
-            contents=prompt,
+            contents=contents,
         )
 
         return {
