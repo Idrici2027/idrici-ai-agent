@@ -4,7 +4,12 @@ import 'package:http/http.dart' as http;
 
 /// One message in the conversation.
 class ChatMessage {
-  const ChatMessage(this.role, this.text, {this.isError = false});
+  const ChatMessage(
+    this.role,
+    this.text, {
+    this.isError = false,
+    this.withImage = false,
+  });
 
   /// 'user' or 'assistant'.
   final String role;
@@ -12,6 +17,9 @@ class ChatMessage {
 
   /// Error bubbles are shown to the user but never sent back to the model.
   final bool isError;
+
+  /// True when a camera frame was sent together with this message.
+  final bool withImage;
 }
 
 class ChatApiException implements Exception {
@@ -29,7 +37,14 @@ class ChatApi {
   static const int maxHistory = 20;
 
   /// Sends [message] together with the previous turns and returns the reply.
-  Future<String> send(String message, List<ChatMessage> previous) async {
+  ///
+  /// [imageBase64] is an optional still frame from the selfie camera (a bare
+  /// base64 JPEG). It is sent for this message only, never kept in history.
+  Future<String> send(
+    String message,
+    List<ChatMessage> previous, {
+    String? imageBase64,
+  }) async {
     final real = previous.where((m) => !m.isError).toList();
     final recent = real.length > maxHistory
         ? real.sublist(real.length - maxHistory)
@@ -43,7 +58,12 @@ class ChatApi {
         .post(
           Uri.parse(_url),
           headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'message': message, 'history': history}),
+          body: jsonEncode({
+            'message': message,
+            'history': history,
+            if (imageBase64 != null && imageBase64.isNotEmpty)
+              'image': imageBase64,
+          }),
         )
         .timeout(const Duration(seconds: 90));
 
