@@ -1,35 +1,32 @@
-
-import importlib.util
+import sys
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+# Make the `app` package importable no matter where the server is started
+# from (e.g. `uvicorn main:app` inside backend/, or `backend.main:app`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from app.models.model_provider import GroqModelProvider  # noqa: E402
+
+MAX_MESSAGE_CHARS = 8000
+MAX_HISTORY_MESSAGES = 20
 
 app = FastAPI(title="Idrici AI API")
 
-provider_path = (
-    Path(__file__).parent
-    / "app"
-    / "models"
-    / "model_provider.py"
-)
 
-spec = importlib.util.spec_from_file_location(
-    "idrici_model_provider",
-    provider_path,
-)
-
-if spec is None or spec.loader is None:
-    raise RuntimeError("Could not load the AI provider module")
-
-provider_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(provider_module)
-
-GroqModelProvider = provider_module.GroqModelProvider
+class HistoryMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=MAX_MESSAGE_CHARS)
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(max_length=MAX_MESSAGE_CHARS)
+    # Previous turns of the conversation, oldest first. Optional, so older
+    # app versions that send only `message` keep working.
+    history: list[HistoryMessage] = Field(default_factory=list)
 
 
 @app.get("/")
@@ -48,17 +45,15 @@ async def chat(request: ChatRequest):
             detail="Message cannot be empty",
         )
 
+    messages = [
+        {"role": item.role, "content": item.content}
+        for item in request.history[-MAX_HISTORY_MESSAGES:]
+    ]
+    messages.append({"role": "user", "content": request.message})
+
     try:
         provider = GroqModelProvider()
-
-        result = await provider.generate(
-            messages=[
-                {
-                    "role": "user",
-                    "content": request.message,
-                }
-            ]
-        )
+        result = await provider.generate(messages=messages)
 
         return {
             "reply": result["text"],
