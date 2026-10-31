@@ -50,13 +50,22 @@ jobs:
               "android.permission.INTERNET",
               "android.permission.RECORD_AUDIO",
               "android.permission.MODIFY_AUDIO_SETTINGS",
+              # selfie camera, so the avatar can follow your hand and face
+              "android.permission.CAMERA",
           ]
           missing = [p for p in permissions if p not in content]
-          if missing:
-              lines = "".join(
-                  f'    <uses-permission android:name="{p}"/>\n'
-                  for p in missing
+          lines = "".join(
+              f'    <uses-permission android:name="{p}"/>\n'
+              for p in missing
+          )
+          # The camera is optional: the app still installs on devices
+          # without one.
+          if 'android.hardware.camera"' not in content:
+              lines += (
+                  '    <uses-feature android:name="android.hardware.camera"'
+                  ' android:required="false"/>\n'
               )
+          if lines:
               content = content.replace(
                   "<application", lines + "    <application", 1
               )
