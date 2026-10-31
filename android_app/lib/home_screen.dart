@@ -34,6 +34,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _languageIndex = 0;
   bool _handsFree = false;
 
+  // While the camera is on, one small photo is sent with each message so
+  // the AI can see you. The eye button turns this off without stopping
+  // the avatar's hand/face tracking.
+  bool _aiSeesMe = true;
+
   // Current listening session.
   String _heard = '';
   String _partial = '';
@@ -70,9 +75,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _onTrackingChanged() {
-    if (_avatar.tracking.value == TrackingStatus.error) {
+    final status = _avatar.tracking.value;
+    if (status == TrackingStatus.error) {
       _showSnack(_avatar.trackingError);
+    } else if (status == TrackingStatus.on && _aiSeesMe) {
+      _showSnack(
+        'الذكاء الاصطناعي سيرى لقطة منك مع كل رسالة. '
+        'اضغط زر العين لإيقاف ذلك.',
+      );
     }
+  }
+
+  void _toggleAiSeesMe() {
+    setState(() => _aiSeesMe = !_aiSeesMe);
+    _showSnack(
+      _aiSeesMe
+          ? 'الذكاء الاصطناعي يرى لقطة منك مع كل رسالة.'
+          : 'لن تُرسل أي صورة. التتبع يبقى على الجهاز فقط.',
+    );
   }
 
   void _toggleTracking() {
@@ -216,13 +236,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _sendText(String text) async {
     final previous = List<ChatMessage>.of(_messages);
 
+    // One photo from the selfie camera, only when it is on and allowed.
+    final image = _aiSeesMe ? await _avatar.captureFrame() : null;
+
     if (!mounted) return;
-    setState(() => _messages.add(ChatMessage('user', text)));
+    setState(() {
+      _messages.add(ChatMessage('user', text, withImage: image != null));
+    });
     _setAgent(AgentState.thinking);
     _scrollToBottom();
 
     try {
-      final reply = await _api.send(text, previous);
+      final reply = await _api.send(text, previous, imageBase64: image);
       if (!mounted) return;
 
       setState(() => _messages.add(ChatMessage('assistant', reply)));
@@ -348,19 +373,38 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             builder: (context, status, _) {
               final on = status == TrackingStatus.on;
               final loading = status == TrackingStatus.loading;
-              return IconButton(
-                tooltip: on ? 'إيقاف الكاميرا' : 'ليراني المجسم (الكاميرا)',
-                onPressed: _toggleTracking,
-                icon: loading
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : Icon(
-                        on ? Icons.videocam : Icons.videocam_off_outlined,
-                        color: on ? _accent : null,
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (on)
+                    IconButton(
+                      tooltip: _aiSeesMe
+                          ? 'الذكاء الاصطناعي يراني (اضغط للإيقاف)'
+                          : 'السماح للذكاء الاصطناعي برؤيتي',
+                      onPressed: _toggleAiSeesMe,
+                      icon: Icon(
+                        _aiSeesMe
+                            ? Icons.visibility
+                            : Icons.visibility_off_outlined,
+                        color: _aiSeesMe ? _accent : null,
                       ),
+                    ),
+                  IconButton(
+                    tooltip:
+                        on ? 'إيقاف الكاميرا' : 'ليراني المجسم (الكاميرا)',
+                    onPressed: _toggleTracking,
+                    icon: loading
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : Icon(
+                            on ? Icons.videocam : Icons.videocam_off_outlined,
+                            color: on ? _accent : null,
+                          ),
+                  ),
+                ],
               );
             },
           ),
@@ -451,9 +495,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       : const Color(0xFF202632),
               borderRadius: BorderRadius.circular(18),
             ),
-            child: SelectableText(
-              message.text,
-              style: const TextStyle(fontSize: 15, height: 1.5),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (message.withImage)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 6),
+                    child: Icon(
+                      Icons.photo_camera_outlined,
+                      size: 14,
+                      color: Colors.white54,
+                    ),
+                  ),
+                SelectableText(
+                  message.text,
+                  style: const TextStyle(fontSize: 15, height: 1.5),
+                ),
+              ],
             ),
           ),
         );
