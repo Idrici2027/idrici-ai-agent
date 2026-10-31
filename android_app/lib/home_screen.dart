@@ -19,7 +19,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   static const Color _accent = Color(0xFF54D6B0);
 
   final ChatApi _api = ChatApi();
@@ -42,11 +42,46 @@ class _HomeScreenState extends State<HomeScreen> {
   VoiceLanguage get _language => voiceLanguages[_languageIndex];
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _avatar.tracking.addListener(_onTrackingChanged);
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _avatar.tracking.removeListener(_onTrackingChanged);
+    _avatar.stopTracking();
+    _avatar.dispose();
     unawaited(_voice.dispose());
     _input.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  /// Privacy: never keep the camera open while the app is in the background.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed &&
+        _avatar.tracking.value != TrackingStatus.off) {
+      _avatar.stopTracking();
+    }
+  }
+
+  void _onTrackingChanged() {
+    if (_avatar.tracking.value == TrackingStatus.error) {
+      _showSnack(_avatar.trackingError);
+    }
+  }
+
+  void _toggleTracking() {
+    if (_avatar.tracking.value == TrackingStatus.off ||
+        _avatar.tracking.value == TrackingStatus.error) {
+      unawaited(_avatar.startTracking());
+    } else {
+      _avatar.stopTracking();
+    }
   }
 
   // ---------------------------------------------------------------- state
@@ -308,6 +343,27 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
         actions: [
+          ValueListenableBuilder<TrackingStatus>(
+            valueListenable: _avatar.tracking,
+            builder: (context, status, _) {
+              final on = status == TrackingStatus.on;
+              final loading = status == TrackingStatus.loading;
+              return IconButton(
+                tooltip: on ? 'إيقاف الكاميرا' : 'ليراني المجسم (الكاميرا)',
+                onPressed: _toggleTracking,
+                icon: loading
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Icon(
+                        on ? Icons.videocam : Icons.videocam_off_outlined,
+                        color: on ? _accent : null,
+                      ),
+              );
+            },
+          ),
           TextButton(
             onPressed: _cycleLanguage,
             child: Text(_language.label),
