@@ -1,3 +1,4 @@
+
 import asyncio
 import json
 import os
@@ -40,13 +41,17 @@ def split_content(content: Any) -> tuple[str, str | None]:
 
     texts: list[str] = []
     image: str | None = None
+
     for part in content or []:
         if part.get("type") == "text":
             texts.append(part.get("text", ""))
+
         elif part.get("type") == "image_url":
             url = (part.get("image_url") or {}).get("url", "")
+
             if url.startswith("data:") and "," in url:
                 image = url.split(",", 1)[1]
+
     return "\n".join(texts), image
 
 
@@ -76,10 +81,13 @@ class MockModelProvider:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+
         last_text, image = split_content(
             messages[-1]["content"] if messages else ""
         )
+
         suffix = " [image received]" if image else ""
+
         return {
             "text": f"Idrici mock response: {last_text}{suffix}",
             "tool_calls": [],
@@ -92,34 +100,51 @@ class GroqModelProvider:
 
     def __init__(self) -> None:
         self.api_key = os.getenv("GROQ_API_KEY")
+
         if not self.api_key:
             raise RuntimeError("GROQ_API_KEY is not configured")
 
-        self.model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
-        # Text-only models cannot read images, so requests that carry a
-        # camera frame go to a vision model. Override with the
-        # GROQ_VISION_MODEL environment variable if Groq renames it.
-        self.vision_model = os.getenv(
-            "GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"
+        self.model = os.getenv(
+            "GROQ_MODEL",
+            "openai/gpt-oss-20b"
         )
-        self.api_url = "https://api.groq.com/openai/v1/chat/completions"
+
+        # Vision model supporting text and image inputs.
+        # Can be overridden using GROQ_VISION_MODEL in Render.
+        self.vision_model = os.getenv(
+            "GROQ_VISION_MODEL",
+            "qwen/qwen3.8-27b"
+        )
+
+        self.api_url = (
+            "https://api.groq.com/openai/v1/chat/completions"
+        )
 
     async def generate(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+
         with_image = has_image(messages)
+
         system_prompt = IDENTITY_INSTRUCTION
+
         if with_image:
-            system_prompt = f"{IDENTITY_INSTRUCTION} {VISION_INSTRUCTION}"
+            system_prompt = (
+                f"{IDENTITY_INSTRUCTION} {VISION_INSTRUCTION}"
+            )
 
         api_messages = [
-            {"role": "system", "content": system_prompt}
+            {
+                "role": "system",
+                "content": system_prompt
+            }
         ]
 
         for message in messages:
             role = message.get("role", "user")
+
             if role not in {"system", "user", "assistant"}:
                 role = "user"
 
@@ -129,7 +154,9 @@ class GroqModelProvider:
             })
 
         payload = json.dumps({
-            "model": self.vision_model if with_image else self.model,
+            "model": (
+                self.vision_model if with_image else self.model
+            ),
             "messages": api_messages,
             "temperature": 0.7,
         }).encode("utf-8")
@@ -148,24 +175,39 @@ class GroqModelProvider:
         def send_request() -> dict[str, Any]:
             try:
                 with urlopen(request, timeout=60) as response:
-                    return json.loads(response.read().decode("utf-8"))
+                    return json.loads(
+                        response.read().decode("utf-8")
+                    )
+
             except HTTPError as exc:
-                error_body = exc.read().decode("utf-8", errors="replace")
+                error_body = exc.read().decode(
+                    "utf-8",
+                    errors="replace"
+                )
+
                 print(
-                    f"Groq API error: HTTP {exc.code}: {error_body[:2000]}",
+                    f"Groq API error: HTTP {exc.code}: "
+                    f"{error_body[:2000]}",
                     flush=True,
                 )
+
                 raise RuntimeError(
-                    f"Groq API returned HTTP {exc.code}: {error_body[:2000]}"
+                    f"Groq API returned HTTP {exc.code}: "
+                    f"{error_body[:2000]}"
                 ) from exc
 
         response_data = await asyncio.to_thread(send_request)
+
         choices = response_data.get("choices", [])
 
         if not choices:
-            raise RuntimeError("Groq returned no response choices")
+            raise RuntimeError(
+                "Groq returned no response choices"
+            )
 
-        reply = (choices[0].get("message") or {}).get("content") or ""
+        reply = (
+            choices[0].get("message", {}).get("content") or ""
+        )
 
         return {
             "text": reply or FALLBACK_REPLY,
@@ -184,11 +226,15 @@ class GeminiModelProvider:
 
     def __init__(self) -> None:
         api_key = os.getenv("GEMINI_API_KEY")
+
         if not api_key:
-            raise RuntimeError("GEMINI_API_KEY is not configured")
+            raise RuntimeError(
+                "GEMINI_API_KEY is not configured"
+            )
 
         try:
             from google import genai
+
         except ImportError as exc:
             raise RuntimeError(
                 "google-genai is not installed. "
@@ -196,27 +242,46 @@ class GeminiModelProvider:
             ) from exc
 
         self.client = genai.Client(api_key=api_key)
-        self.model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+
+        self.model = os.getenv(
+            "GEMINI_MODEL",
+            "gemini-3.8-flash"
+        )
 
     async def generate(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+
         lines: list[str] = []
         image_b64: str | None = None
+
         for message in messages:
-            text, image = split_content(message.get("content", ""))
+            text, image = split_content(
+                message.get("content", "")
+            )
+
             image_b64 = image or image_b64
-            lines.append(f"{message.get('role', 'user')}: {text}")
+
+            lines.append(
+                f"{message.get('role', 'user')}: {text}"
+            )
 
         instruction = IDENTITY_INSTRUCTION
-        if image_b64:
-            instruction = f"{IDENTITY_INSTRUCTION} {VISION_INSTRUCTION}"
 
-        prompt = f"{instruction}\n\nConversation:\n" + "\n\n".join(lines)
+        if image_b64:
+            instruction = (
+                f"{IDENTITY_INSTRUCTION} {VISION_INSTRUCTION}"
+            )
+
+        prompt = (
+            f"{instruction}\n\nConversation:\n"
+            + "\n\n".join(lines)
+        )
 
         contents: Any = prompt
+
         if image_b64:
             import base64
 
