@@ -1,0 +1,1398 @@
+<!doctype html>
+<html lang="ar">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Idrici Avatar</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    /* deep violet glow behind the figure */
+    background: radial-gradient(ellipse at 50% 46%,
+      #2c16b4 0%, #170a64 48%, #07031f 100%);
+    overflow: hidden;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  canvas#c { display: block; width: 100%; height: 100%; }
+  canvas#gl { display: none; }
+  body.gl canvas#c { visibility: hidden; }
+  body.gl canvas#gl { display: block; position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+  #cam { position: absolute; left: 0; top: 0; width: 1px; height: 1px; opacity: 0.01; pointer-events: none; }
+  #preview {
+    display: none; position: absolute; left: 8px; bottom: 8px; width: 84px; height: 112px;
+    border-radius: 14px; border: 1px solid rgba(170, 140, 255, 0.55);
+    transform: scaleX(-1); opacity: 0.92; pointer-events: none;
+  }
+  #fallback {
+    display: none; position: absolute; inset: 0; align-items: center; justify-content: center;
+    padding: 24px; text-align: center; color: #cdbcff; font: 14px/1.6 sans-serif;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<canvas id="gl"></canvas>
+<script src="avatar_image.js" onerror="void 0"></script>
+<script src="avatar_model.js" onerror="void 0"></script>
+<script src="avatar3d.bundle.js" onerror="void 0"></script>
+<video id="cam" playsinline muted autoplay></video>
+<canvas id="preview" width="168" height="224"></canvas>
+<div id="fallback">تعذّر تشغيل المجسم على هذا الجهاز.</div>
+
+<script>
+/*
+ * Idrici hologram avatar (Canvas 2D: no WebGL, no external libraries).
+ * A violet hologram woman with eyes, lips, neck, shoulders and flowing hair.
+ * Intro: vortex -> orb -> emblem -> figure.
+ *
+ * API (called from Flutter):
+ *   avatar.setState('idle'|'listening'|'thinking'|'speaking')
+ *   avatar.setLevel(0..1)   avatar.lookAt(x, y)   avatar.replay()
+ *   avatar.startTracking()  avatar.stopTracking()  avatar.captureFrame()
+ */
+(function () {
+  'use strict';
+
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d');
+  if (!ctx) { document.getElementById('fallback').style.display = 'flex'; return; }
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function ease(t) { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); }
+  function rng(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var COLORS = {
+    idle: [130, 95, 255],
+    listening: [120, 150, 255],
+    thinking: [220, 110, 255],
+    speaking: [190, 140, 255]
+  };
+  var tint = COLORS.idle.slice();
+  var tintTarget = COLORS.idle.slice();
+  var baked = [0, 0, 0];
+  var lastBake = 0;
+
+  function rgba(c, a) {
+    return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + a + ')';
+  }
+  function coreColor(a) {
+    return 'rgba(' + Math.round(lerp(238, tint[0], 0.28)) + ',' + Math.round(lerp(232, tint[1], 0.28)) + ',255,' + a + ')';
+  }
+
+  var S = {
+    state: 'idle', level: 0, age: 0, t: 0,
+    look: { x: 0, y: 0 }, lookStamp: 0, seenStamp: -1e9,
+    lx: 0, ly: 0, mouth: 0, blink: 0, nextBlink: 2.5, level_s: 0
+  };
+
+  // ---------------------------------------------------------------- layout
+  var W = 0, H = 0, dpr = 1, u = 1, ox = 0, oy = 0;
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, (typeof GL !== 'undefined' && GL) ? 1.5 : 2);
+    var w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+    var h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    if (w === W && h === H) { return; }
+    W = canvas.width = w; H = canvas.height = h;
+    if (typeof GL !== 'undefined' && GL) { GL.size(W, H); }
+    u = Math.min(H / 2.6, W / 2.3);
+    ox = W / 2; oy = H * 0.66;
+  }
+
+  // ---------------------------------------------------------------- 3D model
+  // A real 3D hologram: lathe surfaces (head, neck, body) + 3D hair strands,
+  // rotated and projected with perspective every frame. Units: head height .85.
+  var DC = 4.5;                                   // camera distance
+  var LIGHT = (function () { var x = -0.30, y = -0.50, z = 0.81, l = Math.sqrt(x*x+y*y+z*z); return [x/l, y/l, z/l]; })();
+  var DARKC = 'rgba(7,3,30,0.97)';
+
+  function sgnPow(v, p) { return (v < 0 ? -1 : 1) * Math.pow(Math.abs(v), p); }
+  function cr(a, b, c, d, t) {
+    var t2 = t * t, t3 = t2 * t;
+    return 0.5 * ((2*b) + (-a + c) * t + (2*a - 5*b + 4*c - d) * t2 + (-a + 3*b - 3*c + d) * t3);
+  }
+  function prof(tbl, y, k) {
+    var n = tbl.length;
+    if (y <= tbl[0][0]) { return tbl[0][k]; }
+    if (y >= tbl[n - 1][0]) { return tbl[n - 1][k]; }
+    var i = 0;
+    while (i < n - 2 && y > tbl[i + 1][0]) { i++; }
+    var p0 = tbl[Math.max(i - 1, 0)][k], p1 = tbl[i][k], p2 = tbl[i + 1][k], p3 = tbl[Math.min(i + 2, n - 1)][k];
+    var t = (y - tbl[i][0]) / (tbl[i + 1][0] - tbl[i][0]);
+    return Math.max(0, cr(p0, p1, p2, p3, t));
+  }
+
+  // [y, half-width, half-depth]
+  var HEAD = [
+    [-1.32, 0.000, 0.000], [-1.30, 0.090, 0.110], [-1.24, 0.190, 0.240], [-1.12, 0.260, 0.330],
+    [-1.00, 0.285, 0.350], [-0.90, 0.285, 0.340], [-0.80, 0.268, 0.300], [-0.70, 0.235, 0.260],
+    [-0.62, 0.195, 0.230], [-0.55, 0.150, 0.200], [-0.50, 0.105, 0.170], [-0.47, 0.060, 0.130],
+    [-0.455, 0.000, 0.000]
+  ];
+  var NECK = [[-0.62, 0.130, 0.115], [-0.45, 0.140, 0.118], [-0.30, 0.160, 0.126]];
+  var BODY = [
+    [-0.34, 0.16, 0.13], [-0.28, 0.25, 0.15], [-0.20, 0.38, 0.17], [-0.12, 0.51, 0.19],
+    [-0.05, 0.60, 0.20], [0.04, 0.66, 0.21], [0.15, 0.69, 0.21], [0.35, 0.70, 0.20],
+    [0.65, 0.70, 0.20], [0.95, 0.69, 0.19]
+  ];
+
+  function gauss(x, y, cx, cy, sx, sy, amp) {
+    var dx = (x - cx) / sx, dy = (y - cy) / sy;
+    return amp * Math.exp(-(dx * dx + dy * dy));
+  }
+  // relief of the face: nose, brows, eye sockets, cheekbones, lips, chin
+  function feat(x, y) {
+    var ax = Math.abs(x), z = 0;
+    z += gauss(ax, y, 0, -0.93, 0.030, 0.045, 0.018);       // nose bridge
+    z += gauss(ax, y, 0, -0.85, 0.032, 0.050, 0.030);
+    z += gauss(ax, y, 0, -0.768, 0.034, 0.034, 0.060);      // nose tip
+    z += gauss(ax, y, 0.040, -0.748, 0.022, 0.022, 0.028);  // nostril wings
+    z += gauss(ax, y, 0, -1.00, 0.160, 0.028, 0.026);       // brow ridge
+    z += gauss(ax, y, 0.126, -0.90, 0.062, 0.036, -0.024);  // eye sockets
+    z += gauss(ax, y, 0.19, -0.78, 0.060, 0.060, 0.020);    // cheekbones
+    z += gauss(ax, y, 0, -0.652, 0.070, 0.015, 0.030);      // upper lip
+    z += gauss(ax, y, 0, -0.615, 0.065, 0.016, 0.030);      // lower lip
+    z += gauss(ax, y, 0, -0.634, 0.095, 0.004, -0.012);     // mouth line
+    z += gauss(ax, y, 0, -0.520, 0.070, 0.040, 0.034);      // chin
+    return z;
+  }
+  function headFront(x, y) {
+    var a = prof(HEAD, y, 1), b = prof(HEAD, y, 2);
+    if (a < 1e-4) { return 0; }
+    var r = Math.min(0.985, Math.abs(x) / a);
+    return b * Math.sqrt(1 - r * r) + feat(x, y);
+  }
+  function bodyFront(x, y) {
+    var a = prof(BODY, y, 1), b = prof(BODY, y, 2);
+    if (a < 1e-4 || Math.abs(x) >= a) { return 0; }
+    return b * Math.pow(Math.max(0, 1 - Math.pow(Math.abs(x) / a, 2.6)), 1 / 2.6);
+  }
+
+  function Lathe(tbl, y0, y1, rows, N, e, withFeat, seed) {
+    var cnt = (rows + 1) * (N + 1), i, j, k;
+    this.rows = rows; this.N = N; this.cnt = cnt;
+    var F = function () { return new Float32Array(cnt); };
+    this.lx = F(); this.ly = F(); this.lz = F(); this.nx = F(); this.ny = F(); this.nz = F();
+    this.sx = F(); this.sy = F(); this.rz = F(); this.br = F(); this.nzr = F();
+    for (i = 0; i <= rows; i++) {
+      var y = y0 + (y1 - y0) * (i / rows);
+      var a = prof(tbl, y, 1), b = prof(tbl, y, 2);
+      for (j = 0; j <= N; j++) {
+        var th = -Math.PI + 2 * Math.PI * (j / N);
+        var sn = Math.sin(th), cs = Math.cos(th);
+        var x = a * sgnPow(sn, 2 / e), z = b * sgnPow(cs, 2 / e);
+        if (withFeat && cs > 0) { z += feat(x, y); }
+        k = i * (N + 1) + j;
+        this.lx[k] = x; this.ly[k] = y; this.lz[k] = z;
+      }
+    }
+    for (i = 0; i <= rows; i++) {
+      for (j = 0; j <= N; j++) {
+        k = i * (N + 1) + j;
+        var jm = (j === 0) ? N - 1 : j - 1, jp = (j === N) ? 1 : j + 1;
+        var ia = Math.max(i - 1, 0), ib = Math.min(i + 1, rows);
+        var k1 = i * (N + 1) + jp, k0 = i * (N + 1) + jm, k3 = ib * (N + 1) + j, k2 = ia * (N + 1) + j;
+        var tx = this.lx[k1] - this.lx[k0], ty = this.ly[k1] - this.ly[k0], tz = this.lz[k1] - this.lz[k0];
+        var ux = this.lx[k3] - this.lx[k2], uy = this.ly[k3] - this.ly[k2], uz = this.lz[k3] - this.lz[k2];
+        var nx = ty * uz - tz * uy, ny = tz * ux - tx * uz, nz = tx * uy - ty * ux;
+        var L = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        if (L < 1e-9) { nx = 0; ny = i === 0 ? -1 : 1; nz = 0; } else { nx /= L; ny /= L; nz /= L; }
+        this.nx[k] = nx; this.ny[k] = ny; this.nz[k] = nz;
+      }
+    }
+    this.mnx = new Float32Array(rows + 1); this.mny = new Float32Array(rows + 1);
+    this.mxx = new Float32Array(rows + 1); this.mxy = new Float32Array(rows + 1);
+    var r = rng(seed || 3);
+    this.spark = [];
+    for (k = 0; k < cnt; k++) { if (r() < 0.11) { this.spark.push(k); } }
+  }
+
+  var MAXSEG = 9000;
+  var SEG = [0, 1, 2, 3].map(function () { return new Float32Array(MAXSEG * 4); });
+  var SEGN = [0, 0, 0, 0];
+  var A_GLOW = [0.05, 0.09, 0.14, 0.20];
+  var A_CORE = [0.22, 0.42, 0.66, 0.92];
+
+  var ROT = { cy: 1, sy: 0, cp: 1, sp: 0, px: 0, py: 0, pz: 0, tx: 0, ty: 0 };
+  function setRot(R, yaw, pit, px, py, pz, tx, ty) {
+    R.cy = Math.cos(yaw); R.sy = Math.sin(yaw); R.cp = Math.cos(pit); R.sp = Math.sin(pit);
+    R.px = px; R.py = py; R.pz = pz; R.tx = tx; R.ty = ty;
+  }
+  var RH = {}, RN = {}, RB = {};
+
+  function project(Lh, R) {
+    var cy = R.cy, sy = R.sy, cp = R.cp, sp = R.sp;
+    for (var k = 0; k < Lh.cnt; k++) {
+      var x = Lh.lx[k] - R.px, y = Lh.ly[k] - R.py, z = Lh.lz[k] - R.pz;
+      var x1 = x * cy + z * sy, z1 = -x * sy + z * cy;
+      var y2 = y * cp - z1 * sp, z2 = y * sp + z1 * cp;
+      x1 += R.px + R.tx; y2 += R.py + R.ty; z2 += R.pz;
+      var f = DC / (DC - z2);
+      Lh.sx[k] = ox + x1 * f * u; Lh.sy[k] = oy + y2 * f * u; Lh.rz[k] = z2;
+      var nx = Lh.nx[k], ny = Lh.ny[k], nz = Lh.nz[k];
+      var n1x = nx * cy + nz * sy, n1z = -nx * sy + nz * cy;
+      var n2y = ny * cp - n1z * sp, n2z = ny * sp + n1z * cp;
+      Lh.nzr[k] = n2z;
+      var I = n1x * LIGHT[0] + n2y * LIGHT[1] + n2z * LIGHT[2];
+      if (I < 0) { I = 0; }
+      var rim = 1 - Math.abs(n2z);
+      Lh.br[k] = 0.16 + 0.50 * I + 0.62 * rim * rim;
+    }
+  }
+
+  var HEADL = new Lathe(HEAD, -1.32, -0.455, 38, 84, 2, true, 3);
+  var NECKL = new Lathe(NECK, -0.62, -0.30, 8, 48, 2, false, 4);
+  var BODYL = new Lathe(BODY, -0.34, 0.95, 26, 72, 2.6, false, 5);
+
+  function fadeOf(y, fadeBody) {
+    if (!fadeBody) { return 1; }
+    return 1 - ease((y - 0.28) / 0.55);
+  }
+
+  function drawLathe(Lh, fadeBody, mul, rowStep, merStep) {
+    var rows = Lh.rows, N = Lh.N, i, j, k, b;
+    // ---- silhouette
+    for (i = 0; i <= rows; i++) {
+      var mn = 1e9, mx = -1e9, kn = 0, kx = 0;
+      for (j = 0; j < N; j++) {
+        k = i * (N + 1) + j;
+        if (Lh.sx[k] < mn) { mn = Lh.sx[k]; kn = k; }
+        if (Lh.sx[k] > mx) { mx = Lh.sx[k]; kx = k; }
+      }
+      Lh.mnx[i] = Lh.sx[kn]; Lh.mny[i] = Lh.sy[kn];
+      Lh.mxx[i] = Lh.sx[kx]; Lh.mxy[i] = Lh.sy[kx];
+    }
+    if (fadeBody) {
+      var g = ctx.createLinearGradient(0, oy + 0.25 * u, 0, oy + 0.85 * u);
+      g.addColorStop(0, DARKC); g.addColorStop(1, 'rgba(7,3,30,0)');
+      ctx.fillStyle = g;
+    } else { ctx.fillStyle = DARKC; }
+    ctx.beginPath();
+    ctx.moveTo(Lh.mnx[0], Lh.mny[0]);
+    for (i = 1; i <= rows; i++) { ctx.lineTo(Lh.mnx[i], Lh.mny[i]); }
+    for (i = rows; i >= 0; i--) { ctx.lineTo(Lh.mxx[i], Lh.mxy[i]); }
+    ctx.closePath(); ctx.fill();
+
+    // ---- contour lines (rows) and meridians, binned by brightness
+    SEGN[0] = SEGN[1] = SEGN[2] = SEGN[3] = 0;
+    var stride = N + 1;
+    function push(k1, k2) {
+      if (Lh.nzr[k1] < -0.02 || Lh.nzr[k2] < -0.02) { return; }
+      var ff = fadeOf(Lh.ly[k1], fadeBody);
+      if (ff < 0.04) { return; }
+      var v = (Lh.br[k1] + Lh.br[k2]) * 0.5 * ff * mul;
+      var bn = v < 0.30 ? 0 : (v < 0.50 ? 1 : (v < 0.72 ? 2 : 3));
+      var n = SEGN[bn]; if (n >= MAXSEG) { return; }
+      var a = SEG[bn], o = n * 4;
+      a[o] = Lh.sx[k1]; a[o + 1] = Lh.sy[k1]; a[o + 2] = Lh.sx[k2]; a[o + 3] = Lh.sy[k2];
+      SEGN[bn] = n + 1;
+    }
+    for (i = 0; i <= rows; i += rowStep) {
+      for (j = 0; j < N; j++) { k = i * stride + j; push(k, k + 1); }
+    }
+    for (j = 0; j < N; j += merStep) {
+      for (i = 0; i < rows; i++) { k = i * stride + j; push(k, k + stride); }
+    }
+    ctx.lineCap = 'round';
+    for (b = 0; b < 4; b++) {
+      if (!SEGN[b]) { continue; }
+      var arr = SEG[b];
+      ctx.beginPath();
+      for (k = 0; k < SEGN[b]; k++) {
+        ctx.moveTo(arr[k * 4], arr[k * 4 + 1]); ctx.lineTo(arr[k * 4 + 2], arr[k * 4 + 3]);
+      }
+      ctx.strokeStyle = rgba(tint, A_GLOW[b]); ctx.lineWidth = 3.4 * dpr; ctx.stroke();
+      ctx.strokeStyle = coreColor(A_CORE[b]); ctx.lineWidth = (0.7 + 0.22 * b) * dpr; ctx.stroke();
+    }
+
+    // ---- rim light on the outline
+    ctx.beginPath();
+    ctx.moveTo(Lh.mnx[0], Lh.mny[0]);
+    for (i = 1; i <= rows; i++) { ctx.lineTo(Lh.mnx[i], Lh.mny[i]); }
+    ctx.moveTo(Lh.mxx[0], Lh.mxy[0]);
+    for (i = 1; i <= rows; i++) { ctx.lineTo(Lh.mxx[i], Lh.mxy[i]); }
+    ctx.strokeStyle = rgba(tint, 0.20); ctx.lineWidth = 6 * dpr; ctx.stroke();
+    ctx.strokeStyle = coreColor(0.85); ctx.lineWidth = 1.6 * dpr; ctx.stroke();
+
+    // ---- sparkles on the lit surface
+    var tt = S.t;
+    for (k = 0; k < Lh.spark.length; k++) {
+      var q = Lh.spark[k];
+      if (Lh.nzr[q] < 0.05) { continue; }
+      var ff2 = fadeOf(Lh.ly[q], fadeBody);
+      if (ff2 < 0.05) { continue; }
+      var al = Lh.br[q] * ff2 * (0.55 + 0.45 * Math.sin(tt * 3 + q));
+      ctx.fillStyle = coreColor(al);
+      var sz = 1.5 * dpr;
+      ctx.fillRect(Lh.sx[q] - sz / 2, Lh.sy[q] - sz / 2, sz, sz);
+    }
+  }
+
+  // ---- hair: 3D strands that follow the skull and fall over the shoulders
+  var HAIR_A = [[-1.32, 0], [-1.0, 0.33], [-0.8, 0.38], [-0.5, 0.39], [-0.3, 0.44], [0, 0.53], [0.3, 0.59], [0.65, 0.61]];
+  var HAIR_B = [[-1.32, 0], [-1.0, 0.40], [-0.8, 0.40], [-0.5, 0.33], [-0.3, 0.29], [0, 0.27], [0.3, 0.26], [0.65, 0.26]];
+  var HSTEPS = 26;
+  var HAIR3 = (function () {
+    var r = rng(11), out = [], side, i, j;
+    for (side = -1; side <= 1; side += 2) {
+      for (i = 0; i < 95; i++) {
+        var t = i / 94;
+        var phi0 = 1.15 + Math.pow(t, 0.8) * (Math.PI - 1.15 - 0.05) + r() * 0.05;
+        var yEnd = 0.02 + 0.58 * Math.pow(r(), 0.8);
+        var amp = 0.05 + r() * 0.13, fr = 4 + r() * 6, ph = r() * 6.28, off = r() * 0.045;
+        var pts = new Float32Array((HSTEPS + 1) * 3);
+        for (j = 0; j <= HSTEPS; j++) {
+          var uu = j / HSTEPS;
+          var y = -1.318 + (yEnd + 1.318) * Math.pow(uu, 0.9);
+          var ah = Math.max(prof(HEAD, y, 1) * 1.07 + 0.012, prof(HAIR_A, y, 1)) + off;
+          var bh = Math.max(prof(HEAD, y, 2) * 1.07 + 0.012, prof(HAIR_B, y, 1)) + off;
+          var phi = phi0 + Math.sin(uu * fr + ph) * amp * Math.min(1, uu * 2.2);
+          var x = side * ah * Math.sin(phi), z = bh * Math.cos(phi);
+          if (y > -0.4 && z > 0) {
+            var zb = bodyFront(x, y) + 0.025 + off;
+            if (z < zb) { z = zb; }
+          }
+          pts[j * 3] = x; pts[j * 3 + 1] = y; pts[j * 3 + 2] = z;
+        }
+        out.push({ pts: pts, cls: r() < 0.22 ? 2 : (r() < 0.5 ? 1 : 0) });
+      }
+    }
+    return out;
+  })();
+  var HSX = new Float32Array(HAIR3.length * (HSTEPS + 1));
+  var HSY = new Float32Array(HAIR3.length * (HSTEPS + 1));
+  var HRZ = new Float32Array(HAIR3.length * (HSTEPS + 1));
+
+  function projectHair(R) {
+    var cy = R.cy, sy = R.sy, cp = R.cp, sp = R.sp;
+    for (var s = 0; s < HAIR3.length; s++) {
+      var p = HAIR3[s].pts;
+      for (var j = 0; j <= HSTEPS; j++) {
+        var x = p[j * 3] - R.px, y = p[j * 3 + 1] - R.py, z = p[j * 3 + 2] - R.pz;
+        var x1 = x * cy + z * sy, z1 = -x * sy + z * cy;
+        var y2 = y * cp - z1 * sp, z2 = y * sp + z1 * cp;
+        x1 += R.px + R.tx; y2 += R.py + R.ty; z2 += R.pz;
+        var f = DC / (DC - z2), q = s * (HSTEPS + 1) + j;
+        HSX[q] = ox + x1 * f * u; HSY[q] = oy + y2 * f * u; HRZ[q] = z2;
+      }
+    }
+  }
+
+  function drawHair(front) {
+    var hg = ctx.createLinearGradient(0, oy - 1.35 * u, 0, oy + 0.7 * u);
+    hg.addColorStop(0, coreColor(0.95));
+    hg.addColorStop(0.55, rgba(tint, 0.85));
+    hg.addColorStop(1, rgba(tint, 0.22));
+    var wd = [0.9, 1.2, 2.0], al = [0.6, 0.85, 1.0];
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (var cls = 0; cls < 3; cls++) {
+      ctx.beginPath();
+      for (var s = 0; s < HAIR3.length; s++) {
+        if (HAIR3[s].cls !== cls) { continue; }
+        var base = s * (HSTEPS + 1), pen = false;
+        for (var j = 0; j < HSTEPS; j++) {
+          var q = base + j, zz = (HRZ[q] + HRZ[q + 1]) * 0.5;
+          var isFront = zz >= 0;
+          if (isFront !== front) { pen = false; continue; }
+          if (!pen) { ctx.moveTo(HSX[q], HSY[q]); pen = true; }
+          ctx.lineTo(HSX[q + 1], HSY[q + 1]);
+        }
+      }
+      var m = front ? 1 : 0.55;
+      ctx.globalAlpha = m;
+      ctx.strokeStyle = rgba(tint, 0.16); ctx.lineWidth = wd[cls] * 4.5 * dpr; ctx.stroke();
+      ctx.globalAlpha = m * al[cls];
+      ctx.strokeStyle = hg; ctx.lineWidth = wd[cls] * dpr; ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // ---- facial features sitting on the 3D surface (eyes, brows, nose, lips)
+  var TP = { x: 0, y: 0, f: 1 };
+  function P3(x, y, off, R) {
+    var a = prof(HEAD, y, 1);
+    var xs = Math.max(-a * 0.985, Math.min(a * 0.985, x));
+    var px0 = xs, py0 = y, pz0 = headFront(xs, y) + off;
+    var X = px0 - R.px, Y = py0 - R.py, Z = pz0 - R.pz;
+    var x1 = X * R.cy + Z * R.sy, z1 = -X * R.sy + Z * R.cy;
+    var y2 = Y * R.cp - z1 * R.sp, z2 = Y * R.sp + z1 * R.cp;
+    x1 += R.px + R.tx; y2 += R.py + R.ty; z2 += R.pz;
+    var f = DC / (DC - z2);
+    TP.x = ox + x1 * f * u; TP.y = oy + y2 * f * u; TP.f = f;
+  }
+  function glowPath(w, bright) {
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    var ws = [w * 7, w * 3, w * 1.5], as = [0.05, 0.14, 0.34];
+    for (var i = 0; i < 3; i++) {
+      ctx.strokeStyle = rgba(tint, as[i] * bright); ctx.lineWidth = ws[i]; ctx.stroke();
+    }
+    ctx.strokeStyle = coreColor(0.95 * bright); ctx.lineWidth = w; ctx.stroke();
+  }
+  function curve(R, fn, n, off) {
+    for (var i = 0; i <= n; i++) {
+      var p = fn(i / n);
+      P3(p[0], p[1], off, R);
+      if (i === 0) { ctx.moveTo(TP.x, TP.y); } else { ctx.lineTo(TP.x, TP.y); }
+    }
+  }
+
+  function drawFace3D(R, alpha) {
+    var d = dpr, st = S.state;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = alpha;
+
+    var open = 1 + (st === 'listening' ? 0.12 + S.level_s * 0.25 : 0);
+    var eh = 0.030 * open * (1 - S.blink * 0.92), ew = 0.066, ey = -0.90;
+    var gx = clamp(S.lx, -1, 1) * 0.016, gy = -clamp(S.ly, -1, 1) * 0.008;
+    if (st === 'thinking') { gx += Math.sin(S.t * 1.1) * 0.014; gy -= 0.012; }
+
+    for (var s = -1; s <= 1; s += 2) {
+      var cx = s * 0.126;
+      var eyeFn = function (t) {                       // closed almond, t 0..1
+        var uu = -1 + 2 * (t < 0.5 ? t * 2 : 1 - (t - 0.5) * 2);
+        var up = t < 0.5;
+        var h = eh * (1 - uu * uu) * (up ? 0.95 : -0.65);
+        return [cx + ew * uu, ey - h];
+      };
+      ctx.beginPath(); curve(R, eyeFn, 24, 0.006);
+      ctx.fillStyle = rgba(tint, 0.30); ctx.fill();
+      glowPath(1.5 * d, 1);
+      ctx.beginPath(); curve(R, eyeFn, 24, 0.006); glowPath(1.5 * d, 1);
+
+      if (S.blink < 0.7) {
+        P3(cx + gx, ey + gy, 0.010, R);
+        var rad = 0.028 * TP.f * u;
+        var g = ctx.createRadialGradient(TP.x, TP.y, 0, TP.x, TP.y, rad);
+        g.addColorStop(0, coreColor(1)); g.addColorStop(0.5, rgba(tint, 0.85)); g.addColorStop(1, rgba(tint, 0));
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(TP.x, TP.y, rad, 0, 6.2832); ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.beginPath(); ctx.arc(TP.x - rad * 0.25, TP.y - rad * 0.25, rad * 0.22, 0, 6.2832); ctx.fill();
+      }
+      // brow
+      ctx.beginPath();
+      curve(R, function (t) {
+        var a = 1 - t;
+        return [s * (a * a * 0.055 + 2 * a * t * 0.125 + t * t * 0.205),
+                a * a * -0.985 + 2 * a * t * -1.03 + t * t * -0.99];
+      }, 10, 0.012);
+      glowPath(1.4 * d, 0.65);
+      // nose: bridge and wing
+      ctx.beginPath();
+      curve(R, function (t) { return [s * (0.010 + 0.026 * t * t), -0.95 + 0.17 * t]; }, 8, 0.010);
+      curve(R, function (t) { return [s * (0.036 - 0.036 * t), -0.738 - 0.0 * t - 0.02 * Math.sin(t * 3.14)]; }, 6, 0.012);
+      glowPath(1.0 * d, 0.55);
+    }
+
+    // mouth
+    var o = S.mouth, w = 0.098, my = -0.635;
+    var lipTop = function (t) {
+      var x = -w + 2 * w * t, e = Math.sin(t * Math.PI);
+      return [x, my - 0.019 * e + 0.007 * Math.abs(Math.sin(t * Math.PI * 2)) * 0];
+    };
+    var lipBot = function (t) {
+      var x = -w + 2 * w * t, e = Math.sin(t * Math.PI);
+      return [x, my + (0.032 + o * 0.075) * e];
+    };
+    ctx.beginPath(); curve(R, lipTop, 16, 0.012);
+    for (var q = 16; q >= 0; q--) {
+      var pb = lipBot(q / 16); P3(pb[0], pb[1], 0.012, R); ctx.lineTo(TP.x, TP.y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = rgba(tint, o > 0.04 ? 0.38 + o * 0.25 : 0.30); ctx.fill();
+    ctx.beginPath(); curve(R, lipTop, 16, 0.012); glowPath(1.5 * d, 1);
+    ctx.beginPath(); curve(R, lipBot, 16, 0.012); glowPath(1.5 * d, 0.9);
+    ctx.restore();
+  }
+
+  function drawFigure(t) {
+    var yaw = S.lx * 0.40, pit = S.ly * 0.20;
+    var bob = Math.sin(t * 1.3) * 0.004;
+    setRot(RH, yaw, pit, 0, -0.40, 0, 0, bob);
+    setRot(RN, yaw * 0.6, pit * 0.5, 0, -0.35, 0, 0, bob * 0.6);
+    setRot(RB, yaw * 0.22, 0, 0, 0.2, 0, 0, 0);
+    project(HEADL, RH); project(NECKL, RN); project(BODYL, RB);
+    projectHair(RH);
+
+    drawHair(false);          // hair behind the head
+    drawLathe(NECKL, false, 0.7, 1, 12);
+    drawLathe(BODYL, true, 0.55, 2, 12);
+    drawLathe(HEADL, false, 0.78, 1, 8);
+    drawHair(true);           // hair in front
+    return RH;
+  }
+
+  // ---------------------------------------------------------------- particles
+  var PN = 120;
+  var P = (function () {
+    var r = rng(5), a = [];
+    for (var i = 0; i < PN; i++) {
+      a.push({
+        x: (r() * 2 - 1) * 0.85, y: -1.5 + r() * 2.2, v: 0.02 + r() * 0.07,
+        ph: r() * 6.28, sz: 0.8 + Math.pow(r(), 2.2) * 2.4,
+        sx: (r() * 2 - 1) * 0.12, sy: -0.5 + (r() * 2 - 1) * 0.12, d: r()
+      });
+    }
+    return a;
+  })();
+
+  // ---------------------------------------------------------------- drawing
+  function drawHalo(level, t) {
+    var cx = ox, cy = oy - 0.62 * u, R = 0.98 * u * (1 + 0.012 * Math.sin(t * 1.3) + level * 0.05);
+    var g = ctx.createRadialGradient(cx, cy, R * 0.2, cx, cy, R * 1.25);
+    g.addColorStop(0, rgba(tint, 0.0));
+    g.addColorStop(0.75, rgba(tint, 0.10 + level * 0.12));
+    g.addColorStop(1, rgba(tint, 0));
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(cx, cy, R * 1.25, 0, 6.2832); ctx.fill();
+
+    ctx.lineWidth = 3 * dpr; ctx.strokeStyle = rgba(tint, 0.30 + level * 0.3);
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, 6.2832); ctx.stroke();
+    ctx.lineWidth = 1.2 * dpr; ctx.strokeStyle = coreColor(0.75);
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, 6.2832); ctx.stroke();
+
+    // slow dashed outer ring
+    ctx.save();
+    ctx.translate(cx, cy); ctx.rotate(t * 0.12);
+    ctx.setLineDash([6 * dpr, 14 * dpr]);
+    ctx.lineWidth = 1 * dpr; ctx.strokeStyle = rgba(tint, 0.35);
+    ctx.beginPath(); ctx.arc(0, 0, R * 1.09, 0, 6.2832); ctx.stroke();
+    ctx.restore();
+
+    // ripples while listening / speaking
+    if (S.state === 'listening' || S.state === 'speaking') {
+      for (var k = 0; k < 2; k++) {
+        var ph = ((t * 0.7 + k * 0.5) % 1);
+        ctx.strokeStyle = rgba(tint, (1 - ph) * 0.35);
+        ctx.lineWidth = 1.5 * dpr;
+        ctx.beginPath(); ctx.arc(cx, cy, R * (1.0 + ph * 0.22), 0, 6.2832); ctx.stroke();
+      }
+    }
+    if (S.state === 'thinking') {
+      ctx.save();
+      ctx.translate(cx, cy); ctx.rotate(t * 1.6);
+      ctx.lineWidth = 3 * dpr; ctx.strokeStyle = coreColor(0.85);
+      for (var q = 0; q < 3; q++) {
+        ctx.beginPath(); ctx.arc(0, 0, R * 1.04, q * 2.094, q * 2.094 + 0.7); ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  function drawParticles(t, introT, alphaScale) {
+    ctx.save();
+    ctx.setTransform(u, 0, 0, u, ox, oy);
+    ctx.globalCompositeOperation = 'lighter';
+    var px = 1 / u;
+    for (var i = 0; i < PN; i++) {
+      var p = P[i];
+      var yy = p.y - ((t * p.v) % 2.2);
+      if (yy < -1.5) { yy += 2.2; }
+      var x = p.x + Math.sin(t * 0.4 + p.ph) * 0.02, y = yy;
+      var a = 0.25 + 0.55 * (0.5 + 0.5 * Math.sin(t * 2 + p.ph));
+      if (introT < 1) {
+        var k = ease((S.age - 2.8 - p.d * 0.9) / 1.3);
+        x = lerp(p.sx + Math.cos(S.age * 2 + p.ph) * 0.05, x, k);
+        y = lerp(p.sy + Math.sin(S.age * 2 + p.ph) * 0.05, y, k);
+        a *= ease((S.age - 1.0) / 0.8);
+      }
+      ctx.fillStyle = coreColor(a * alphaScale);
+      var s = p.sz * dpr * px;
+      ctx.fillRect(x - s / 2, y - s / 2, s, s);
+    }
+    ctx.restore();
+  }
+
+  function drawVortex(age) {
+    var a = 1 - ease((age - 1.8) / 1.0);
+    if (a <= 0) { return; }
+    var cx = ox, cy = oy - 0.62 * u;
+    var Rmax = u * (1.05 - 0.75 * ease((age - 0.9) / 1.4));
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+    for (var arm = 0; arm < 7; arm++) {
+      ctx.beginPath();
+      for (var j = 0; j <= 48; j++) {
+        var f = j / 48;
+        var r = Math.pow(f, 1.35) * Rmax + 4 * dpr;
+        var th = arm * 0.8976 + f * 4.2 - age * 2.4 + Math.sin(f * 6 + arm) * 0.15;
+        var x = cx + Math.cos(th) * r, y = cy + Math.sin(th) * r * 0.9;
+        if (j === 0) { ctx.moveTo(x, y); } else { ctx.lineTo(x, y); }
+      }
+      ctx.strokeStyle = rgba(tint, 0.28 * a); ctx.lineWidth = 4 * dpr; ctx.stroke();
+      ctx.strokeStyle = coreColor(0.75 * a); ctx.lineWidth = 1.1 * dpr; ctx.stroke();
+    }
+    var g = ctx.createRadialGradient(cx, cy, 0, cx, cy, u * 0.35);
+    g.addColorStop(0, coreColor(0.95 * a)); g.addColorStop(0.35, rgba(tint, 0.5 * a)); g.addColorStop(1, rgba(tint, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, u * 0.35, 0, 6.2832); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawOrb(age) {
+    var a = ease((age - 1.3) / 0.6) * (1 - ease((age - 3.2) / 0.6));
+    if (a <= 0) { return; }
+    var cx = ox, cy = oy - 0.62 * u;
+    var r = u * (0.07 + 0.09 * ease((age - 1.4) / 1.0)) * (1 - 0.5 * ease((age - 2.8) / 0.6));
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    var g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * 3.2);
+    g.addColorStop(0, coreColor(a)); g.addColorStop(0.3, rgba(tint, 0.7 * a)); g.addColorStop(1, rgba(tint, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, r * 3.2, 0, 6.2832); ctx.fill();
+    for (var i = 0; i < 5; i++) {
+      var rx = u * (0.30 + i * 0.07) * (1 - 0.4 * ease((age - 2.6) / 0.8));
+      ctx.strokeStyle = rgba(tint, 0.55 * a); ctx.lineWidth = 1.2 * dpr;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rx, rx * (0.22 + 0.1 * i), age * (0.9 + i * 0.25) + i * 1.1, 0, 6.2832);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawEmblem(age) {
+    var a = Math.sin(clamp((age - 2.3) / 1.9, 0, 1) * Math.PI);
+    if (a <= 0) { return; }
+    var cx = ox, cy = oy - 0.62 * u, R = u * 0.32;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineWidth = 3.5 * dpr; ctx.strokeStyle = rgba(tint, 0.6 * a);
+    ctx.beginPath(); ctx.arc(0, 0, R, 0, 6.2832); ctx.stroke();
+    ctx.lineWidth = 1.3 * dpr; ctx.strokeStyle = coreColor(a);
+    ctx.beginPath(); ctx.arc(0, 0, R, 0, 6.2832); ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, 0, R * 0.72, 0, 6.2832); ctx.stroke();
+    for (var i = 0; i < 8; i++) {          // petals
+      ctx.save(); ctx.rotate(i * Math.PI / 4 + age * 0.4);
+      ctx.beginPath();
+      ctx.moveTo(0, -R * 0.20);
+      ctx.quadraticCurveTo(R * 0.20, -R * 0.45, 0, -R * 0.68);
+      ctx.quadraticCurveTo(-R * 0.20, -R * 0.45, 0, -R * 0.20);
+      ctx.stroke(); ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  // slow flowing energy lines in the background
+  function drawWaves(t, a) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineWidth = 1.2 * dpr;
+    for (var i = 0; i < 5; i++) {
+      var y0 = H * (0.12 + i * 0.19), amp = H * (0.03 + 0.01 * i), ph = i * 1.7 + t * (0.18 + i * 0.03);
+      ctx.strokeStyle = rgba(tint, (0.10 + 0.04 * (i % 2)) * a);
+      ctx.beginPath();
+      for (var x = 0; x <= W; x += W / 24) {
+        var y = y0 + Math.sin(x / W * 5 + ph) * amp + Math.sin(x / W * 11 + ph * 1.3) * amp * 0.3;
+        if (x === 0) { ctx.moveTo(x, y); } else { ctx.lineTo(x, y); }
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawScan(t, alpha) {
+    // faint horizontal scan lines + a moving brighter band (hologram look)
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    var top = oy - 1.45 * u, bot = oy + 0.75 * u;
+    var y = top + ((t * 0.18) % 1) * (bot - top);
+    var g = ctx.createLinearGradient(0, y - 24 * dpr, 0, y + 24 * dpr);
+    g.addColorStop(0, rgba(tint, 0)); g.addColorStop(0.5, rgba(tint, 0.07 * alpha)); g.addColorStop(1, rgba(tint, 0));
+    ctx.fillStyle = g; ctx.fillRect(ox - 0.95 * u, y - 24 * dpr, 1.9 * u, 48 * dpr);
+    ctx.restore();
+  }
+
+
+  // ---------------------------------------------------------------- WebGL post-processing
+  // The 2D canvas above is only the "source". Here it is uploaded as a texture,
+  // blurred at several scales (bloom), and composited over a procedural smoke /
+  // flowing-ribbon background with chromatic aberration, vignette and tone mapping.
+  var GL = (function () {
+    var gc = document.getElementById('gl');
+    var gl = null;
+    try {
+      gl = gc.getContext('webgl', { alpha: false, antialias: false, depth: false, stencil: false });
+    } catch (e) { gl = null; }
+    if (!gl) { return null; }
+
+    var VS = 'attribute vec2 p;varying vec2 v;void main(){v=p*0.5+0.5;gl_Position=vec4(p,0.,1.);}';
+    var HEAD = '#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\nvarying vec2 v;\n';
+
+    var FS_BLUR = HEAD +
+      'uniform sampler2D t;uniform vec2 d;' +
+      'void main(){vec4 c=texture2D(t,v)*0.227027;' +
+      'c+=(texture2D(t,v+d*1.3846)+texture2D(t,v-d*1.3846))*0.3162162;' +
+      'c+=(texture2D(t,v+d*3.2308)+texture2D(t,v-d*3.2308))*0.0702703;' +
+      'gl_FragColor=c;}';
+
+    var FS_BG = HEAD +
+      'uniform float t;uniform float pulse;uniform vec3 col;uniform vec2 asp;' +
+      'float h(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}' +
+      'float n(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);' +
+      'return mix(mix(h(i),h(i+vec2(1.,0.)),f.x),mix(h(i+vec2(0.,1.)),h(i+vec2(1.,1.)),f.x),f.y);}' +
+      'float fbm(vec2 p){float a=.5,s=0.;for(int i=0;i<4;i++){s+=a*n(p);p=p*2.03+vec2(1.7,9.2);a*=.5;}return s;}' +
+      'void main(){' +
+      'vec2 uv=v;vec2 p=(uv-.5)*asp*2.2;' +
+      'vec2 q=vec2(fbm(p+vec2(0.,t*.04)),fbm(p+vec2(5.2,1.3)-t*.03));' +
+      'float r=fbm(p+2.6*q+t*.02);' +
+      'float smoke=smoothstep(.28,.85,r);' +
+      'float d=length((uv-vec2(.5,.54))*vec2(1.,.8));' +
+      'vec3 c=mix(vec3(.17,.09,.70),vec3(.028,.012,.12),smoothstep(.0,.78,d));' +
+      'c+=col*(.10+.22*pulse)*smoke*smoke*1.7;' +
+      'float w=p.y+1.6*q.x+.35*sin(p.x*1.4+t*.15);' +
+      'float l1=pow(max(0.,1.-abs(sin(w*5.))),30.);' +
+      'float l2=pow(max(0.,1.-abs(sin(w*9.+1.7))),55.);' +
+      'c+=col*(l1*.32+l2*.20)*(.25+.75*smoke);' +
+      'gl_FragColor=vec4(c,1.);}';
+
+    var FS_FINAL = HEAD +
+      'uniform sampler2D s,b,b1,b2,b3;uniform vec3 col;uniform float pulse;uniform float t;uniform vec2 px;uniform float luma;' +
+      'void main(){' +
+      'vec2 uv=v;vec2 dir=(uv-.5)*.0030*(1.+pulse);' +
+      'vec4 s0=texture2D(s,uv);' +
+      'vec3 src=vec3(texture2D(s,uv+dir).r,s0.g,texture2D(s,uv-dir).b);' +
+      'vec3 bg=texture2D(b,uv).rgb;' +
+      'vec3 add=src+src*src*.35' +
+      '+texture2D(b1,uv).rgb*(.55+.5*pulse)' +
+      '+texture2D(b2,uv).rgb*(.6+.6*pulse)' +
+      '+texture2D(b3,uv).rgb*(.5+.5*pulse);' +
+      'float cov=mix(s0.a*.85,clamp(max(max(src.r,src.g),src.b)*1.6,0.,1.),luma);' +
+      'vec3 c=bg*(1.-cov)+(1.-exp(-add*1.1));' +
+      'c*=1.-.42*smoothstep(.35,.98,length((uv-.5)*vec2(.9,1.)));' +
+      'c+=(fract(sin(dot(uv*px+t,vec2(12.9898,78.233)))*43758.5453)-.5)*.016;' +
+      'gl_FragColor=vec4(c,1.);}';
+
+    function sh(type, src) {
+      var o = gl.createShader(type);
+      gl.shaderSource(o, src); gl.compileShader(o);
+      if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) { throw new Error(gl.getShaderInfoLog(o)); }
+      return o;
+    }
+    function prog(fs) {
+      var pr = gl.createProgram();
+      gl.attachShader(pr, sh(gl.VERTEX_SHADER, VS));
+      gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs));
+      gl.bindAttribLocation(pr, 0, 'p');
+      gl.linkProgram(pr);
+      if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) { throw new Error(gl.getProgramInfoLog(pr)); }
+      var U = {};
+      pr.u = function (name) {
+        if (!(name in U)) { U[name] = gl.getUniformLocation(pr, name); }
+        return U[name];
+      };
+      return pr;
+    }
+
+    var pBlur, pBg, pFin;
+    try {
+      pBlur = prog(FS_BLUR); pBg = prog(FS_BG); pFin = prog(FS_FINAL);
+    } catch (e) {
+      try { console.log('GL disabled: ' + e.message); } catch (e2) {}
+      return null;
+    }
+
+    var buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+    function tex(w, h) {
+      var t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      if (w) { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null); }
+      return t;
+    }
+    function rt(w, h) {
+      var t = tex(w, h), f = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      return { t: t, f: f, w: w, h: h };
+    }
+
+    var srcTex = tex(0, 0);
+    var bgRT = null, tmp = [], lvl = [];     // lvl[i] = final blurred texture of level i
+    var cw = 0, ch = 0, lost = false;
+
+    function size(W, H) {
+      gc.width = W; gc.height = H; cw = W; ch = H;
+      bgRT = rt(Math.max(2, W >> 2), Math.max(2, H >> 2));
+      tmp = []; lvl = [];
+      for (var i = 0; i < 3; i++) {
+        var w = Math.max(2, W >> (i + 2)), h = Math.max(2, H >> (i + 2));
+        tmp.push(rt(w, h)); lvl.push(rt(w, h));
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+
+    function pass(pr, target, w, h, binds, setup) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.f : null);
+      gl.viewport(0, 0, w, h);
+      gl.useProgram(pr);
+      for (var i = 0; i < binds.length; i++) {
+        gl.activeTexture(gl.TEXTURE0 + i);
+        gl.bindTexture(gl.TEXTURE_2D, binds[i][0]);
+        gl.uniform1i(pr.u(binds[i][1]), i);
+      }
+      setup(pr);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    gc.addEventListener('webglcontextlost', function (e) {
+      e.preventDefault(); lost = true;
+      document.body.classList.remove('gl');
+    });
+
+    function render(t, col, pulse, luma) {
+      if (lost || !cw) { return; }
+      var c = [col[0] / 255, col[1] / 255, col[2] / 255];
+
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, srcTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+
+      pass(pBg, bgRT, bgRT.w, bgRT.h, [], function (pr) {
+        gl.uniform1f(pr.u('t'), t); gl.uniform1f(pr.u('pulse'), pulse);
+        gl.uniform3f(pr.u('col'), c[0], c[1], c[2]);
+        gl.uniform2f(pr.u('asp'), cw / ch, 1);
+      });
+
+      var input = srcTex, iw = cw, ih = ch;
+      for (var i = 0; i < 3; i++) {
+        var T = tmp[i], L = lvl[i];
+        var k = i === 0 ? 2.0 : 1.5;
+        pass(pBlur, T, T.w, T.h, [[input, 't']], function (pr) { gl.uniform2f(pr.u('d'), k / iw, 0); });
+        pass(pBlur, L, L.w, L.h, [[T.t, 't']], function (pr) { gl.uniform2f(pr.u('d'), 0, 1.5 / T.h); });
+        input = L.t; iw = L.w; ih = L.h;
+      }
+
+      pass(pFin, null, cw, ch,
+        [[srcTex, 's'], [bgRT.t, 'b'], [lvl[0].t, 'b1'], [lvl[1].t, 'b2'], [lvl[2].t, 'b3']],
+        function (pr) {
+          gl.uniform3f(pr.u('col'), c[0], c[1], c[2]);
+          gl.uniform1f(pr.u('pulse'), pulse);
+          gl.uniform1f(pr.u('luma'), luma ? 1 : 0);
+          gl.uniform1f(pr.u('t'), t % 100);
+          gl.uniform2f(pr.u('px'), cw, ch);
+        });
+    }
+
+    document.body.classList.add('gl');
+    return { size: size, render: render };
+  })();
+
+  // optional high-quality artwork: avatar_image.js defines window.AVATAR_IMG (data URI)
+  var IMG = null;
+  if (window.AVATAR_IMG) {
+    var im = new Image();
+    im.onload = function () { IMG = im; };
+    im.src = window.AVATAR_IMG;
+  }
+
+  function drawImageFigure(t, pulse) {
+    var sc = (3.05 * u) / IMG.height;
+    var br = 1 + 0.006 * Math.sin(t * 1.3) + 0.012 * pulse;
+    var w = IMG.width * sc * br, h = IMG.height * sc * br;
+    var x = ox - w / 2 + S.lx * 0.035 * u;
+    var y = oy - 1.6 * u + (3.05 * u - h) + S.ly * -0.02 * u + Math.sin(t * 1.3) * 0.006 * u;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(IMG, x, y, w, h);
+    ctx.restore();
+  }
+
+  function A3D() { return !!(window.Avatar3D && window.Avatar3D.ready); }
+  var a3dW = 0, a3dH = 0;
+  function drawModel3D(t) {
+    var A = window.Avatar3D;
+    if (a3dW !== W || a3dH !== H) { a3dW = W; a3dH = H; A.setSize(W, H); }
+    A.update(t, S, tint);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(A.canvas, 0, 0, W, H);
+    ctx.restore();
+  }
+
+
+  // ---------------------------------------------------------------- agent nodes + particle core
+  var NODES = (function () {
+    var r = rng(77), arr = [];
+    var orbits = [
+      { rx: 1.06, ry: 0.30, tilt: -0.35, sp: 0.16 },
+      { rx: 1.22, ry: 0.42, tilt: 0.55, sp: -0.11 },
+      { rx: 0.93, ry: 0.22, tilt: 1.25, sp: 0.21 }
+    ];
+    for (var i = 0; i < 15; i++) {
+      arr.push({ o: i % 3, a: r() * 6.283, sz: 0.7 + r() * 0.9, ph: r(), ring: r() < 0.3 });
+    }
+    return { orbits: orbits, nodes: arr };
+  })();
+  var CORE = (function () {
+    var arr = [], N = 150, ga = Math.PI * (3 - Math.sqrt(5));
+    for (var i = 0; i < N; i++) {
+      var y = 1 - (i / (N - 1)) * 2, rr = Math.sqrt(1 - y * y), th = ga * i;
+      arr.push([Math.cos(th) * rr, y, Math.sin(th) * rr]);
+    }
+    return arr;
+  })();
+
+  function coreY() { return oy + 0.20 * u; }
+
+  function nodePositions(t) {
+    var R = 0.98 * u, cy = oy - 0.62 * u;
+    var speed = S.state === 'thinking' ? 2.4 : (S.state === 'speaking' ? 1.4 : 1);
+    return NODES.nodes.map(function (n) {
+      var O = NODES.orbits[n.o], a = n.a + t * O.sp * speed;
+      var x = Math.cos(a) * O.rx, y = Math.sin(a) * O.ry;
+      var c = Math.cos(O.tilt), s = Math.sin(O.tilt);
+      return { x: ox + (x * c - y * s) * R, y: cy + (x * s + y * c) * R, d: Math.sin(a), n: n };
+    });
+  }
+
+  // front=false: nodes behind the figure; front=true: nodes in front + links to the core
+  function drawNodes(t, front) {
+    var P = nodePositions(t), R = 0.98 * u, i, j;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+    var thinking = S.state === 'thinking';
+
+    // links between neighbouring nodes on the same side
+    ctx.lineWidth = 1 * dpr;
+    for (i = 0; i < P.length; i++) {
+      if ((P[i].d >= 0) !== front) { continue; }
+      for (j = i + 1; j < P.length; j++) {
+        if ((P[j].d >= 0) !== front) { continue; }
+        var dx = P[i].x - P[j].x, dy = P[i].y - P[j].y, dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 0.75 * R) {
+          ctx.strokeStyle = rgba(tint, (1 - dist / (0.75 * R)) * (thinking ? 0.7 : 0.45));
+          ctx.beginPath(); ctx.moveTo(P[i].x, P[i].y); ctx.lineTo(P[j].x, P[j].y); ctx.stroke();
+        }
+      }
+    }
+
+    // spokes from the core while thinking / speaking, with a travelling pulse
+    if (front && (thinking || S.state === 'speaking')) {
+      var cx = ox, cy = coreY();
+      for (i = 0; i < P.length; i += 2) {
+        if (P[i].d < 0) { continue; }
+        ctx.strokeStyle = rgba(tint, thinking ? 0.22 : 0.10);
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(P[i].x, P[i].y); ctx.stroke();
+        var f = (t * (thinking ? 0.9 : 0.5) + P[i].n.ph) % 1;
+        ctx.fillStyle = coreColor(0.9);
+        ctx.beginPath(); ctx.arc(cx + (P[i].x - cx) * f, cy + (P[i].y - cy) * f, 2.2 * dpr, 0, 6.2832); ctx.fill();
+      }
+    }
+
+    // the nodes themselves
+    for (i = 0; i < P.length; i++) {
+      var p = P[i];
+      if ((p.d >= 0) !== front) { continue; }
+      var ds = 0.75 + 0.25 * p.d;
+      var r = 6.0 * dpr * p.n.sz * ds * (1 + (thinking ? 0.25 * Math.sin(t * 6 + p.n.ph * 6) : 0));
+      var g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 3);
+      g.addColorStop(0, coreColor(0.95)); g.addColorStop(0.35, rgba(tint, 0.45)); g.addColorStop(1, rgba(tint, 0));
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(p.x, p.y, r * 3, 0, 6.2832); ctx.fill();
+      if (p.n.ring) {
+        ctx.strokeStyle = rgba(tint, 0.6 * ds); ctx.lineWidth = 1.2 * dpr;
+        ctx.beginPath(); ctx.arc(p.x, p.y, r * 2.2, 0, 6.2832); ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawCore(t) {
+    var lvl = Math.max(S.level_s, S.state === 'speaking' ? S.mouth * 0.7 : 0);
+    var cx = ox, cy = coreY();
+    var R = 0.19 * u * (1 + 0.12 * lvl + (S.state === 'thinking' ? 0.05 * Math.sin(t * 7) : 0));
+    var spin = t * (S.state === 'thinking' ? 1.8 : 0.55), cs = Math.cos(spin), sn = Math.sin(spin);
+    var tx = 0.35, ct = Math.cos(tx), st = Math.sin(tx);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    var g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 2.2);
+    g.addColorStop(0, rgba(tint, 0.32 + 0.25 * lvl)); g.addColorStop(1, rgba(tint, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R * 2.2, 0, 6.2832); ctx.fill();
+    for (var i = 0; i < CORE.length; i++) {
+      var q = CORE[i];
+      var x = q[0] * cs + q[2] * sn, z = -q[0] * sn + q[2] * cs, y = q[1];
+      var y2 = y * ct - z * st, z2 = y * st + z * ct;
+      var depth = (z2 + 1) / 2;
+      var sz = (1.0 + 1.3 * depth) * dpr;
+      ctx.fillStyle = depth > 0.6 ? coreColor(0.35 + 0.6 * depth) : rgba(tint, 0.18 + 0.6 * depth);
+      ctx.fillRect(cx + x * R - sz / 2, cy + y2 * R - sz / 2, sz, sz);
+    }
+    // equator ring
+    ctx.strokeStyle = rgba(tint, 0.35 + 0.3 * lvl); ctx.lineWidth = 1 * dpr;
+    ctx.beginPath(); ctx.ellipse(cx, cy, R * 1.25, R * 1.25 * 0.3, spin * 0.5, 0, 6.2832); ctx.stroke();
+    ctx.restore();
+  }
+
+  // ---------------------------------------------------------------- main loop
+  var last = performance.now();
+
+  function frame(now) {
+    requestAnimationFrame(frame);
+    if (document.hidden) { last = now; return; }
+    try {
+      var dt = Math.min(0.05, Math.max(0.001, (now - last) / 1000));
+      last = now;
+      resize();
+      if (!W) { return; }
+
+      S.age += dt; S.t += dt;
+      var t = S.t;
+
+      // colour transition between states
+      var k = 1 - Math.exp(-5 * dt);
+      for (var i = 0; i < 3; i++) { tint[i] = lerp(tint[i], tintTarget[i], k); }
+
+      // gaze: follow lookAt, otherwise wander gently
+      var idle = (now - S.lookStamp) > 2500;
+      var tx = idle ? Math.sin(t * 0.45) * 0.28 : S.look.x;
+      var ty = idle ? Math.sin(t * 0.31 + 1) * 0.10 : S.look.y;
+      var lk = 1 - Math.exp(-6 * dt);
+      S.lx = lerp(S.lx, tx, lk); S.ly = lerp(S.ly, ty, lk);
+
+      // blink
+      S.nextBlink -= dt;
+      if (S.nextBlink < 0) { S.blinkT = 0.16; S.nextBlink = 2.2 + Math.random() * 3.2; }
+      if (S.blinkT > 0) {
+        S.blinkT -= dt;
+        S.blink = Math.sin(clamp(S.blinkT / 0.16, 0, 1) * Math.PI);
+      } else { S.blink = 0; }
+
+      // loudness + mouth
+      S.level_s = lerp(S.level_s, S.state === 'listening' ? S.level : 0, 1 - Math.exp(-14 * dt));
+      var mt = 0;
+      if (S.state === 'speaking') {
+        mt = 0.18 + 0.82 * Math.abs(Math.sin(t * 9.0) * Math.sin(t * 5.3 + 1.0) * (0.6 + 0.4 * Math.sin(t * 2.1)));
+      } else if (S.state === 'listening') {
+        mt = S.level_s * 0.18;
+      }
+      S.mouth = lerp(S.mouth, mt, 1 - Math.exp(-20 * dt));
+
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+      ctx.clearRect(0, 0, W, H);
+
+      var age = S.age;
+      var introDone = age > 5.4;
+      var figA = ease((age - 3.2) / 0.9);
+      var flicker = 0.955 + 0.045 * Math.sin(t * 23) * Math.sin(t * 3.7);
+
+      drawWaves(t, ease((age - 0.5) / 1.5));
+      if (age > 1.2) { drawHalo(S.level_s, t); }
+      drawParticles(t, introDone ? 1 : 0, introDone ? 1 : 0.9);
+
+      if (figA > 0) {
+        ctx.save();
+        if (!introDone) {
+          var top = oy - 1.5 * u, bot = oy + 0.9 * u;
+          var ry = lerp(top, bot, ease((age - 3.2) / 2.1));
+          ctx.beginPath(); ctx.rect(0, 0, W, ry); ctx.clip();
+        }
+        ctx.globalAlpha = figA * flicker;
+        ctx.globalCompositeOperation = 'source-over';
+        drawNodes(t, false);
+        if (A3D()) {
+          drawModel3D(t);
+        } else if (IMG) {
+          drawImageFigure(t, S.state === 'speaking' ? S.mouth : S.level_s);
+        } else {
+          var RHd = drawFigure(t);
+          drawFace3D(RHd, 1);
+        }
+        drawCore(t);
+        drawNodes(t, true);
+        ctx.restore();
+        drawScan(t, figA);
+
+        if (!introDone) {
+          var ry2 = lerp(oy - 1.5 * u, oy + 0.9 * u, ease((age - 3.2) / 2.1));
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          var gl = ctx.createLinearGradient(0, ry2 - 14 * dpr, 0, ry2 + 4 * dpr);
+          gl.addColorStop(0, rgba(tint, 0)); gl.addColorStop(1, coreColor(0.8));
+          ctx.fillStyle = gl; ctx.fillRect(ox - 1.1 * u, ry2 - 14 * dpr, 2.2 * u, 18 * dpr);
+          ctx.restore();
+        }
+      }
+
+      if (age < 4.6) { drawVortex(age); drawOrb(age); drawEmblem(age); }
+      if (GL) {
+        var pulse = clamp(Math.max(S.level_s * 1.4, S.state === 'speaking' ? S.mouth * 0.7 : 0, S.state === 'thinking' ? 0.25 + 0.15 * Math.sin(t * 3) : 0), 0, 1);
+        GL.render(t, tint, pulse, !!(IMG || A3D()));
+      }
+    } catch (e) {
+      // never let a drawing error freeze the page or crash the app
+    }
+  }
+
+  window.avatar = {
+    ready: true,
+    setState: function (name) {
+      if (!Object.prototype.hasOwnProperty.call(COLORS, name)) { return; }
+      S.state = name;
+      tintTarget = COLORS[name].slice();
+    },
+    setLevel: function (v) { S.level = clamp(Number(v) || 0, 0, 1); },
+    lookAt: function (x, y) {
+      S.look.x = clamp(Number(x) || 0, -1, 1);
+      S.look.y = clamp(Number(y) || 0, -1, 1);
+      S.lookStamp = performance.now();
+    },
+    replay: function () { S.age = 0; }
+  };
+
+
+  // ---------- pointer + camera tracking (hand + face, on-device) ----------
+  function onPointer(e) {
+    var x = (e.clientX / window.innerWidth) * 2 - 1;
+    var y = -((e.clientY / window.innerHeight) * 2 - 1);
+    window.avatar.lookAt(x, y);
+  }
+  window.addEventListener('pointermove', onPointer, { passive: true });
+  window.addEventListener('pointerdown', onPointer, { passive: true });
+
+  // ---------- camera tracking (hand + face, on-device) ----------
+  var MP_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+  var MODEL_BASE = 'https://storage.googleapis.com/mediapipe-models/';
+  var FACE_MODEL = MODEL_BASE +
+      'face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+  var HAND_MODEL = MODEL_BASE +
+      'hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+
+  var cam = document.getElementById('cam');
+  var preview = document.getElementById('preview');
+  var pctx = preview.getContext('2d');
+
+  var track = {
+    wantOn: false,
+    running: false,
+    starting: false,
+    stream: null,
+    face: null,
+    hand: null,
+    raf: 0,
+    lastRun: 0,
+    lastTime: -1,
+    n: 0,
+    handStamp: -1e9,
+    presence: ''
+  };
+
+  function notify(msg) {
+    try {
+      if (window.Tracker && window.Tracker.postMessage) {
+        window.Tracker.postMessage(String(msg));
+      }
+    } catch (e) { /* the page also works outside Flutter */ }
+  }
+
+  function setPresence(p) {
+    if (p !== track.presence) {
+      track.presence = p;
+      notify('seen:' + p);
+    }
+  }
+
+  // Selfie frames are not mirrored: someone on the user's right appears on
+  // the left of the image, so x is flipped. y is flipped too (up = +1).
+  function aim(p, gain) {
+    window.avatar.lookAt(
+      clamp((0.5 - p.x) * 2 * gain, -1, 1),
+      clamp((0.5 - p.y) * 2 * gain, -1, 1)
+    );
+  }
+
+  async function loadModels() {
+    var vision = await import(MP_BASE + '/vision_bundle.mjs');
+    var files = await vision.FilesetResolver.forVisionTasks(MP_BASE + '/wasm');
+
+    async function make(Cls, model, extra) {
+      var opts = Object.assign({
+        baseOptions: { modelAssetPath: model, delegate: 'GPU' },
+        runningMode: 'VIDEO'
+      }, extra);
+      try {
+        return await Cls.createFromOptions(files, opts);
+      } catch (e) {
+        // some WebViews have no usable GPU delegate; fall back to the CPU
+        opts.baseOptions.delegate = 'CPU';
+        return await Cls.createFromOptions(files, opts);
+      }
+    }
+
+    track.hand = await make(vision.HandLandmarker, HAND_MODEL, { numHands: 1 });
+    track.face = await make(vision.FaceLandmarker, FACE_MODEL, { numFaces: 1 });
+  }
+
+  function drawPreview(hand, face) {
+    var cw = preview.width, ch = preview.height;
+    var vw = cam.videoWidth, vh = cam.videoHeight;
+    if (!vw || !vh) { return; }
+    var s = Math.max(cw / vw, ch / vh);
+    var ox = (cw - vw * s) / 2, oy = (ch - vh * s) / 2;
+    pctx.drawImage(cam, ox, oy, vw * s, vh * s);
+
+    function dot(p, r, color) {
+      pctx.beginPath();
+      pctx.arc(p.x * vw * s + ox, p.y * vh * s + oy, r, 0, Math.PI * 2);
+      pctx.fillStyle = color;
+      pctx.fill();
+    }
+    if (hand) {
+      for (var i = 0; i < hand.length; i++) {
+        dot(hand[i], i === 9 ? 5 : 2.5, i === 9 ? '#ffd166' : '#6f86ff');
+      }
+    }
+    if (face) { dot(face[1], 4, '#6ee7ff'); }
+  }
+
+  function tick() {
+    if (!track.running) { return; }
+    track.raf = requestAnimationFrame(tick);
+
+    var now = performance.now();
+    // ~20 detections per second, and only for new camera frames
+    if (cam.readyState < 2 || now - track.lastRun < 50 ||
+        cam.currentTime === track.lastTime) { return; }
+    track.lastRun = now;
+    track.lastTime = cam.currentTime;
+    track.n++;
+
+    var hand = null, face = null;
+    try {
+      var hr = track.hand.detectForVideo(cam, now);
+      if (hr && hr.landmarks && hr.landmarks.length) { hand = hr.landmarks[0]; }
+
+      // the face is only needed when no hand is visible; run it every
+      // other frame to keep the phone cool
+      if (!hand && track.n % 2 === 0) {
+        var fr = track.face.detectForVideo(cam, now);
+        if (fr && fr.faceLandmarks && fr.faceLandmarks.length) {
+          face = fr.faceLandmarks[0];
+        }
+      }
+    } catch (e) {
+      return; // skip a bad frame
+    }
+
+    if (hand) {
+      track.handStamp = now;
+      S.seenStamp = now;
+      aim(hand[9], 1.7);           // landmark 9 = middle of the palm
+      setPresence('hand');
+    } else if (face) {
+      S.seenStamp = now;
+      aim(face[1], 1.4);           // landmark 1 = tip of the nose
+      setPresence('face');
+    } else if (now - track.handStamp > 500 &&
+               now - S.seenStamp > 800 && track.n % 2 === 0) {
+      setPresence('none');
+    }
+
+    drawPreview(hand, face);
+  }
+
+  function stopTracking(silent) {
+    track.wantOn = false;
+    track.running = false;
+    cancelAnimationFrame(track.raf);
+    if (track.stream) {
+      track.stream.getTracks().forEach(function (tr) { tr.stop(); });
+      track.stream = null;
+    }
+    cam.srcObject = null;
+    preview.style.display = 'none';
+    track.presence = '';
+    if (!silent) { notify('stopped'); }
+  }
+
+  async function startTracking() {
+    if (track.running || track.starting) { return; }
+    track.starting = true;
+    track.wantOn = true;
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw { name: 'CameraUnsupported' };
+      }
+      notify('loading');
+
+      // models first, so the camera light only turns on when we can use it
+      if (!track.hand || !track.face) { await loadModels(); }
+      if (!track.wantOn) { return; }
+
+      var stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'user',
+          width: { ideal: 480 },
+          height: { ideal: 640 }
+        },
+        audio: false
+      });
+      if (!track.wantOn) {
+        stream.getTracks().forEach(function (tr) { tr.stop(); });
+        return;
+      }
+
+      cam.srcObject = stream;
+      await cam.play();
+      track.stream = stream;
+      track.running = true;
+      track.lastTime = -1;
+      preview.style.display = 'block';
+      notify('started');
+      tick();
+    } catch (e) {
+      stopTracking(true);
+      var name = (e && (e.name || e.message)) || 'unknown';
+      notify('error:' + name);
+    } finally {
+      track.starting = false;
+    }
+  }
+
+  window.avatar.startTracking = function () { startTracking(); };
+  window.avatar.stopTracking = function () { stopTracking(false); };
+
+  // One still frame for the AI: a small JPEG (longest side 512 px) as bare
+  // base64, or '' when the camera is off. Flutter reads the return value.
+  window.avatar.captureFrame = function () {
+    try {
+      if (!track.running || !cam.videoWidth || !cam.videoHeight) { return ''; }
+      var scale = Math.min(1, 512 / Math.max(cam.videoWidth, cam.videoHeight));
+      var c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(cam.videoWidth * scale));
+      c.height = Math.max(1, Math.round(cam.videoHeight * scale));
+      c.getContext('2d').drawImage(cam, 0, 0, c.width, c.height);
+      return c.toDataURL('image/jpeg', 0.7).split(',')[1] || '';
+    } catch (e) {
+      return '';
+    }
+  };
+  window.addEventListener('pagehide', function () { stopTracking(true); });
+
+  if (/[?&]skip/.test(location.search)) { S.age = 6; }
+  window.addEventListener('resize', resize);
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
