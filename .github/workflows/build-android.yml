@@ -1,3 +1,4 @@
+
 name: Build Idrici AI Android APK
 
 on:
@@ -17,6 +18,17 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build 3D avatar bundle (three.js)
+        working-directory: android_app/web3d
+        run: |
+          npm install
+          npm run build
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
