@@ -1,0 +1,10 @@
+{
+  "name": "idrici-avatar3d",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build": "esbuild src/avatar3d.js --bundle --minify --format=iife --target=chrome90 --outfile=../assets/avatar/avatar3d.bundle.js"
+  },
+  "dependencies": { "three": "0.170.0" },
+  "devDependencies": { "esbuild": "0.24.0" }
+}
