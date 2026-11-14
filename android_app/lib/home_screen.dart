@@ -236,7 +236,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _setAgent(AgentState.idle);
       return;
     }
-    unawaited(_sendText(text));
+    unawaited(_sendText(text, fromVoice: true));
   }
 
   // ---------------------------------------------------------------- chat
@@ -254,7 +254,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     await _sendText(text);
   }
 
-  Future<void> _sendText(String text) async {
+  Future<void> _sendText(String text, {bool fromVoice = false}) async {
     final previous = List<ChatMessage>.of(_messages);
 
     // One photo from the selfie camera, only when it is on and allowed.
@@ -268,7 +268,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _scrollToBottom();
 
     try {
-      final reply = await _api.send(text, previous, imageBase64: image);
+      final reply = await _api.send(
+        text,
+        previous,
+        imageBase64: image,
+        fromVoice: fromVoice,
+      );
       if (!mounted) return;
 
       setState(() => _messages.add(ChatMessage('assistant', reply)));
