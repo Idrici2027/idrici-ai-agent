@@ -1,19 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import 'avatar_view.dart';
 import 'chat_api.dart';
-import 'package:permission_handler/permission_handler.dart';
-
 import 'voice_service.dart';
 
-/// Main screen: the hologram on top, the conversation below, and the
-/// microphone / text input at the bottom.
-///
-/// The conversation loop is:
-///   idle -> listening -> thinking -> speaking -> idle
-/// (and back to listening automatically when hands-free mode is on).
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -21,7 +14,8 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+class _HomeScreenState extends State<HomeScreen>
+    with WidgetsBindingObserver {
   static const Color _accent = Color(0xFF54D6B0);
 
   final ChatApi _api = ChatApi();
@@ -35,13 +29,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   AgentState _state = AgentState.idle;
   int _languageIndex = 0;
   bool _handsFree = false;
-
-  // While the camera is on, one small photo is sent with each message so
-  // the AI can see you. The eye button turns this off without stopping
-  // the avatar's hand/face tracking.
   bool _aiSeesMe = true;
+  bool _loadingConversations = false;
 
-  // Current listening session.
+  String? _conversationId;
+
   String _heard = '';
   String _partial = '';
   bool _submitted = false;
@@ -67,7 +59,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  /// Privacy: never keep the camera open while the app is in the background.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed &&
@@ -106,8 +97,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  // ---------------------------------------------------------------- state
-
   void _setAgent(AgentState state) {
     if (!mounted) return;
     setState(() => _state = state);
@@ -133,14 +122,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     });
   }
 
-  // ---------------------------------------------------------------- voice in
+  // ------------------------------------------------ voice input
 
   Future<void> _onMicPressed() async {
     switch (_state) {
       case AgentState.thinking:
         return;
       case AgentState.listening:
-        // The status callback submits what was heard.
         await _voice.stopListening();
         return;
       case AgentState.speaking:
@@ -156,7 +144,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _startListening() async {
     if (_state != AgentState.idle) return;
 
-    // Ask for the microphone ourselves first, with a clear message.
     try {
       final mic = await Permission.microphone.request();
       if (!mic.isGranted) {
@@ -165,7 +152,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               ? 'إذن الميكروفون مرفوض. فعّله من إعدادات التطبيق.'
               : 'يلزم السماح باستخدام الميكروفون.',
         );
-        if (mic.isPermanentlyDenied) unawaited(openAppSettings());
+        if (mic.isPermanentlyDenied) {
+          unawaited(openAppSettings());
+        }
         return;
       }
     } catch (_) {
@@ -215,14 +204,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void _onSpeechError(String message) {
     if (!mounted || _state != AgentState.listening) return;
 
-    // Silence / nothing recognised is normal, not an error to show.
     final quiet = message == 'error_no_match' ||
         message == 'error_speech_timeout';
 
     _submitted = true;
     if (mounted) setState(() => _partial = '');
     _setAgent(AgentState.idle);
-    if (!quiet) _showSnack('تعذر التعرف على الصوت ($message).');
+
+    if (!quiet) {
+      _showSnack('تعذر التعرف على الصوت ($message).');
+    }
   }
 
   void _submitHeard() {
@@ -236,83 +227,111 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _setAgent(AgentState.idle);
       return;
     }
+
     unawaited(_sendText(text, fromVoice: true));
   }
 
-  // ---------------------------------------------------------------- chat
+  // ------------------------------------------------ chat
 
   Future<void> _sendTyped() async {
     final text = _input.text.trim();
     if (text.isEmpty || _state == AgentState.thinking) return;
 
     _input.clear();
-    _submitted = true; // ignore late speech callbacks
+    _submitted = true;
 
-    if (_state == AgentState.listening) await _voice.cancelListening();
-    if (_state == AgentState.speaking) await _voice.stopSpeaking();
+    if (_state == AgentState.listening) {
+      await _voice.cancelListening();
+    }
+    if (_state == AgentState.speaking) {
+      await _voice.stopSpeaking();
+    }
 
     await _sendText(text);
   }
 
-  Future<void> _sendText(String text, {bool fromVoice = false}) async {
+  Future<void> _sendText(
+    String text, {
+    bool fromVoice = false,
+  }) async {
+    if (_state == AgentState.thinking) return;
+
     final previous = List<ChatMessage>.of(_messages);
 
-    // One photo from the selfie camera, only when it is on and allowed.
-    final image = _aiSeesMe ? await _avatar.captureFrame() : null;
-
-    if (!mounted) return;
-    setState(() {
-      _messages.add(ChatMessage('user', text, withImage: image != null));
-    });
-    _setAgent(AgentState.thinking);
-    _scrollToBottom();
-
     try {
+      final image =
+          _aiSeesMe ? await _avatar.captureFrame() : null;
+
+      if (!mounted) return;
+
+      // Create a persistent conversation when needed.
+      String conversationId = _conversationId ?? '';
+
+      if (conversationId.isEmpty) {
+        final created = await _api.createConversation();
+        conversationId = created.id;
+
+        if (conversationId.isEmpty) {
+          throw ChatApiException(
+            'لم يتم إنشاء معرّف المحادثة.',
+          );
+        }
+
+        _conversationId = conversationId;
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        _messages.add(
+          ChatMessage(
+            'user',
+            text,
+            withImage: image != null,
+          ),
+        );
+      });
+
+      _setAgent(AgentState.thinking);
+      _scrollToBottom();
+
       final reply = await _api.send(
         text,
         previous,
         imageBase64: image,
         fromVoice: fromVoice,
+        conversationId: conversationId,
       );
+
       if (!mounted) return;
 
-      setState(() => _messages.add(ChatMessage('assistant', reply)));
+      setState(() {
+        _messages.add(ChatMessage('assistant', reply));
+      });
+
       _scrollToBottom();
       await _speak(reply);
     } catch (e) {
       if (!mounted) return;
+
       setState(() {
-        _messages.add(ChatMessage(
-          'assistant',
-          'تعذر الحصول على رد من الذكاء الاصطناعي.\n'
-          'التفاصيل: $e\n'
-          'تحقق من اتصال الإنترنت وإعدادات الخادم.',
-          isError: true,
-        ));
+        _messages.add(
+          ChatMessage(
+            'assistant',
+            'تعذر الحصول على رد من الذكاء الاصطناعي.\n'
+            'التفاصيل: $e\n'
+            'تحقق من اتصال الإنترنت وإعدادات الخادم.',
+            isError: true,
+          ),
+        );
       });
+
       _setAgent(AgentState.idle);
       _scrollToBottom();
     }
   }
 
-  // ---------------------------------------------------------------- voice out
-
-  Future<void> _speak(String reply) async {
-    _setAgent(AgentState.speaking);
-
-    try {
-      await _voice.speak(reply, _language);
-    } catch (_) {
-      // A TTS failure should not break the conversation.
-    }
-
-    if (!mounted || _state != AgentState.speaking) return;
-
-    _setAgent(AgentState.idle);
-    if (_handsFree) unawaited(_startListening());
-  }
-
-  // ---------------------------------------------------------------- actions
+  // ------------------------------------------------ saved conversations
 
   Future<void> _newConversation() async {
     if (_state == AgentState.thinking) return;
@@ -321,13 +340,175 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     await _voice.cancelListening();
     await _voice.stopSpeaking();
 
-    if (!mounted) return;
-    setState(() {
-      _messages.clear();
-      _partial = '';
-    });
-    _setAgent(AgentState.idle);
+    try {
+      final created = await _api.createConversation();
+
+      if (!mounted) return;
+
+      setState(() {
+        _conversationId = created.id;
+        _messages.clear();
+        _partial = '';
+      });
+
+      _setAgent(AgentState.idle);
+      _showSnack('تم إنشاء محادثة جديدة وحفظها.');
+    } catch (e) {
+      _showSnack('تعذر إنشاء المحادثة: $e');
+    }
   }
+
+  Future<void> _loadConversation(String id) async {
+    if (_state == AgentState.thinking) return;
+
+    _submitted = true;
+    await _voice.cancelListening();
+    await _voice.stopSpeaking();
+
+    try {
+      final details = await _api.getConversation(id);
+
+      if (!mounted) return;
+
+      setState(() {
+        _conversationId = details.conversation.id;
+        _messages
+          ..clear()
+          ..addAll(details.messages);
+        _partial = '';
+      });
+
+      _setAgent(AgentState.idle);
+      _scrollToBottom();
+      _showSnack('تم استرجاع المحادثة السابقة.');
+    } catch (e) {
+      _showSnack('تعذر تحميل المحادثة: $e');
+    }
+  }
+
+  Future<void> _showConversations() async {
+    if (_loadingConversations ||
+        _state == AgentState.thinking) {
+      return;
+    }
+
+    setState(() => _loadingConversations = true);
+
+    try {
+      final conversations = await _api.listConversations();
+
+      if (!mounted) return;
+
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) {
+          return AlertDialog(
+            backgroundColor: const Color(0xFF202632),
+            title: const Text('المحادثات المحفوظة'),
+            content: SizedBox(
+              width: double.maxFinite,
+              height: 360,
+              child: conversations.isEmpty
+                  ? const Center(
+                      child: Text('لا توجد محادثات محفوظة بعد.'),
+                    )
+                  : ListView.builder(
+                      itemCount: conversations.length,
+                      itemBuilder: (context, index) {
+                        final conversation = conversations[index];
+
+                        return ListTile(
+                          leading: const Icon(
+                            Icons.chat_bubble_outline,
+                            color: _accent,
+                          ),
+                          title: Text(
+                            conversation.title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            '${conversation.messageCount} رسالة',
+                          ),
+                          trailing: IconButton(
+                            tooltip: 'حذف المحادثة',
+                            icon: const Icon(
+                              Icons.delete_outline,
+                              color: Colors.redAccent,
+                            ),
+                            onPressed: () async {
+                              try {
+                                await _api.deleteConversation(
+                                  conversation.id,
+                                );
+
+                                if (!mounted) return;
+
+                                if (_conversationId ==
+                                    conversation.id) {
+                                  setState(() {
+                                    _conversationId = null;
+                                    _messages.clear();
+                                  });
+                                }
+
+                                Navigator.of(dialogContext).pop();
+                                _showSnack('تم حذف المحادثة.');
+                              } catch (e) {
+                                _showSnack('تعذر الحذف: $e');
+                              }
+                            },
+                          ),
+                          onTap: () {
+                            Navigator.of(dialogContext).pop();
+                            unawaited(
+                              _loadConversation(conversation.id),
+                            );
+                          },
+                        );
+                      },
+                    ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () =>
+                    Navigator.of(dialogContext).pop(),
+                child: const Text('إغلاق'),
+              ),
+            ],
+          );
+        },
+      );
+    } catch (e) {
+      _showSnack('تعذر جلب المحادثات: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _loadingConversations = false);
+      }
+    }
+  }
+
+  // ------------------------------------------------ voice output
+
+  Future<void> _speak(String reply) async {
+    _setAgent(AgentState.speaking);
+
+    try {
+      await _voice.speak(reply, _language);
+    } catch (_) {
+      // TTS failure should not break the conversation.
+    }
+
+    if (!mounted || _state != AgentState.speaking) return;
+
+    _setAgent(AgentState.idle);
+
+    if (_handsFree) {
+      unawaited(_startListening());
+    }
+  }
+
+  // ------------------------------------------------ actions
 
   Future<void> _cycleLanguage() async {
     if (_state == AgentState.listening) {
@@ -335,14 +516,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       await _voice.cancelListening();
       _setAgent(AgentState.idle);
     }
+
     if (!mounted) return;
+
     setState(() {
-      _languageIndex = (_languageIndex + 1) % voiceLanguages.length;
+      _languageIndex =
+          (_languageIndex + 1) % voiceLanguages.length;
     });
   }
 
   void _toggleHandsFree() {
     setState(() => _handsFree = !_handsFree);
+
     _showSnack(
       _handsFree
           ? 'المحادثة الحرة مفعّلة: أستمع تلقائيًا بعد كل رد.'
@@ -350,7 +535,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  // ---------------------------------------------------------------- UI
+  // ------------------------------------------------ UI
 
   String get _statusText {
     switch (_state) {
@@ -381,7 +566,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final media = MediaQuery.of(context);
     final keyboardOpen = media.viewInsets.bottom > 0;
-    final avatarHeight = media.size.height * (keyboardOpen ? 0.16 : 0.36);
+    final avatarHeight =
+        media.size.height * (keyboardOpen ? 0.16 : 0.36);
 
     return Scaffold(
       appBar: AppBar(
@@ -390,15 +576,34 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           children: [
             Icon(Icons.auto_awesome, color: _accent),
             SizedBox(width: 10),
-            Text('Idrici AI', style: TextStyle(fontWeight: FontWeight.bold)),
+            Text(
+              'Idrici AI',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'المحادثات السابقة',
+            onPressed: _loadingConversations
+                ? null
+                : _showConversations,
+            icon: _loadingConversations
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                    ),
+                  )
+                : const Icon(Icons.history),
+          ),
           ValueListenableBuilder<TrackingStatus>(
             valueListenable: _avatar.tracking,
             builder: (context, status, _) {
               final on = status == TrackingStatus.on;
               final loading = status == TrackingStatus.loading;
+
               return Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -416,17 +621,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       ),
                     ),
                   IconButton(
-                    tooltip:
-                        on ? 'إيقاف الكاميرا' : 'ليراني المجسم (الكاميرا)',
+                    tooltip: on
+                        ? 'إيقاف الكاميرا'
+                        : 'ليراني المجسم (الكاميرا)',
                     onPressed: _toggleTracking,
                     icon: loading
                         ? const SizedBox(
                             width: 20,
                             height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                            ),
                           )
                         : Icon(
-                            on ? Icons.videocam : Icons.videocam_off_outlined,
+                            on
+                                ? Icons.videocam
+                                : Icons.videocam_off_outlined,
                             color: on ? _accent : null,
                           ),
                   ),
@@ -442,7 +652,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             tooltip: 'المحادثة الحرة',
             onPressed: _toggleHandsFree,
             icon: Icon(
-              _handsFree ? Icons.hearing : Icons.hearing_disabled_outlined,
+              _handsFree
+                  ? Icons.hearing
+                  : Icons.hearing_disabled_outlined,
               color: _handsFree ? _accent : null,
             ),
           ),
@@ -471,14 +683,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Widget _buildStatus() {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+      padding: const EdgeInsets.symmetric(
+        horizontal: 20,
+        vertical: 6,
+      ),
       child: Text(
         _statusText,
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
         textAlign: TextAlign.center,
         style: TextStyle(
-          color: _state == AgentState.idle ? Colors.white54 : _accent,
+          color: _state == AgentState.idle
+              ? Colors.white54
+              : _accent,
           fontSize: 14,
         ),
       ),
@@ -493,7 +710,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           child: Text(
             'تحدث معي أو اكتب لي، وسأرد عليك بصوتي.',
             textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white70, fontSize: 15, height: 1.6),
+            style: TextStyle(
+              color: Colors.white70,
+              fontSize: 15,
+              height: 1.6,
+            ),
           ),
         ),
       );
@@ -508,7 +729,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         final isUser = message.role == 'user';
 
         return Align(
-          alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+          alignment: isUser
+              ? Alignment.centerRight
+              : Alignment.centerLeft,
           child: Container(
             constraints: const BoxConstraints(maxWidth: 310),
             margin: const EdgeInsets.only(bottom: 12),
@@ -535,7 +758,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   ),
                 SelectableText(
                   message.text,
-                  style: const TextStyle(fontSize: 15, height: 1.5),
+                  style: const TextStyle(
+                    fontSize: 15,
+                    height: 1.5,
+                  ),
                 ),
               ],
             ),
@@ -552,7 +778,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
       decoration: const BoxDecoration(
         color: Color(0xFF171C25),
-        border: Border(top: BorderSide(color: Color(0xFF292F3A))),
+        border: Border(
+          top: BorderSide(color: Color(0xFF292F3A)),
+        ),
       ),
       child: Row(
         children: [
