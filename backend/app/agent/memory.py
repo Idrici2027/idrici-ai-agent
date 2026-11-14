@@ -197,6 +197,95 @@ class MemoryStore:
                 scored.append((score, item["updated"], item))
         scored.sort(key=lambda s: (s[0], s[1]), reverse=True)
         return [s[2] for s in scored[:limit]]
+            def search_conversation_context(
+        self,
+        owner_id: str,
+        query: str,
+        exclude_conversation_id: str | None = None,
+        limit: int = 5,
+    ) -> list[dict]:
+        """
+        Search relevant messages from the owner's previous conversations.
+        The current conversation can be excluded.
+        Conversation content is returned as untrusted data.
+        """
+        owner_id = self._validate_owner_id(owner_id)
+        wanted = tokens(query)
+
+        if not wanted:
+            return []
+
+        limit = max(1, min(int(limit), 20))
+        conn = self._conn()
+
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                    c.id AS conversation_id,
+                    c.title AS conversation_title,
+                    m.id AS message_id,
+                    m.role,
+                    m.content,
+                    m.created
+                FROM conversation_messages AS m
+                JOIN conversations AS c
+                    ON c.id = m.conversation_id
+                WHERE c.owner_id = ?
+                  AND (? IS NULL OR c.id != ?)
+                ORDER BY m.created DESC
+                LIMIT 2000
+                """,
+                (
+                    owner_id,
+                    exclude_conversation_id,
+                    exclude_conversation_id,
+                ),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        scored = []
+
+        for row in rows:
+            item = dict(row)
+            content = item["content"]
+
+            # Never retrieve messages that appear to contain secrets.
+            if looks_secret(content):
+                continue
+
+            available = tokens(content)
+
+            score = sum(
+                1
+                for word in wanted
+                if any(
+                    word == candidate
+                    or (
+                        len(word) >= 4
+                        and len(candidate) >= 4
+                        and (
+                            candidate.startswith(word)
+                            or word.startswith(candidate)
+                        )
+                    )
+                    for candidate in available
+                )
+            )
+
+            if score:
+                scored.append((score, item["created"], item))
+
+        scored.sort(
+            key=lambda entry: (entry[0], entry[1]),
+            reverse=True,
+        )
+
+        return [
+            item
+            for _, _, item in scored[:limit]
+        ]
 
     # ------------------------------------------------ conversations
 
