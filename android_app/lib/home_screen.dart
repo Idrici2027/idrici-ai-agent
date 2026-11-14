@@ -358,14 +358,21 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  // ------------------------------------------------ UPDATED: load conversation
+
   Future<void> _loadConversation(String id) async {
     if (_state == AgentState.thinking) return;
 
     _submitted = true;
-    await _voice.cancelListening();
-    await _voice.stopSpeaking();
+    _setAgent(AgentState.thinking);
 
     try {
+      await _voice.cancelListening();
+      await _voice.stopSpeaking();
+
+      if (!mounted) return;
+      setState(() => _partial = '');
+
       final details = await _api.getConversation(id);
 
       if (!mounted) return;
@@ -382,6 +389,9 @@ class _HomeScreenState extends State<HomeScreen>
       _scrollToBottom();
       _showSnack('تم استرجاع المحادثة السابقة.');
     } catch (e) {
+      if (!mounted) return;
+
+      _setAgent(AgentState.idle);
       _showSnack('تعذر تحميل المحادثة: $e');
     }
   }
