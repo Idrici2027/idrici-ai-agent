@@ -197,7 +197,8 @@ class MemoryStore:
                 scored.append((score, item["updated"], item))
         scored.sort(key=lambda s: (s[0], s[1]), reverse=True)
         return [s[2] for s in scored[:limit]]
-            def search_conversation_context(
+
+    def search_conversation_context(
         self,
         owner_id: str,
         query: str,
