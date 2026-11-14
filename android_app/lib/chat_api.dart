@@ -33,7 +33,12 @@ class ChatApiException implements Exception {
 
 /// Talks to the Idrici backend.
 class ChatApi {
-  static const String _url = 'https://idrici-ai-agent.onrender.com/chat';
+  // Override at build time: --dart-define=IDRICI_URL=... --dart-define=IDRICI_API_KEY=...
+  static const String _url = String.fromEnvironment(
+    'IDRICI_URL',
+    defaultValue: 'https://idrici-ai-agent.onrender.com/chat',
+  );
+  static const String _apiKey = String.fromEnvironment('IDRICI_API_KEY');
   static const int maxHistory = 20;
 
   /// Sends [message] together with the previous turns and returns the reply.
@@ -44,6 +49,7 @@ class ChatApi {
     String message,
     List<ChatMessage> previous, {
     String? imageBase64,
+    bool fromVoice = false,
   }) async {
     final real = previous.where((m) => !m.isError).toList();
     final recent = real.length > maxHistory
@@ -57,9 +63,13 @@ class ChatApi {
     final response = await http
         .post(
           Uri.parse(_url),
-          headers: {'Content-Type': 'application/json'},
+          headers: {
+            'Content-Type': 'application/json',
+            if (_apiKey.isNotEmpty) 'X-API-Key': _apiKey,
+          },
           body: jsonEncode({
             'message': message,
+            'input_mode': fromVoice ? 'voice' : 'text',
             'history': history,
             if (imageBase64 != null && imageBase64.isNotEmpty)
               'image': imageBase64,
