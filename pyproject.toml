@@ -11,10 +11,11 @@ dependencies = [
     "fastapi>=0.115,<1.0",
     "uvicorn[standard]>=0.30,<1.0",
     "pydantic>=2.8,<3.0",
-    "google-genai>=1.0.0",
+
 ]
 
 [project.optional-dependencies]
+gemini = ["google-genai>=1.0.0"]
 dev = [
     "pytest>=8.0,<9.0",
     "pytest-asyncio>=0.24,<2.0",
