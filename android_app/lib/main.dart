@@ -13,10 +13,15 @@ void main() {
     FlutterError.onError = (details) {
       FlutterError.presentError(details);
     };
-    PlatformDispatcher.instance.onError = (error, stack) => true;
+    PlatformDispatcher.instance.onError = (error, stack) {
+      debugPrint('Unhandled error: $error\n$stack');
+      return true;
+    };
 
     runApp(const IdriciApp());
-  }, (error, stack) {});
+  }, (error, stack) {
+    debugPrint('Zone error: $error\n$stack');
+  });
 }
 
 class IdriciApp extends StatelessWidget {
