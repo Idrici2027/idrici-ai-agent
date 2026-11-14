@@ -14,8 +14,16 @@ IDENTITY_INSTRUCTION = (
     "Answer in the user's language whenever possible. "
     "Be helpful, accurate, and clear. "
     "Never claim to have completed real-world actions unless you actually have. "
-    "Never say you heard the user's voice unless told the message was spoken; "
-    "typed messages are read, not heard."
+    "The Idrici AI mobile app converts every assistant reply to speech using "
+    "text-to-speech. You can therefore speak to the user through the app. "
+    "Never claim that you cannot speak, talk, or answer by voice. "
+    "If asked whether you can speak, clearly answer yes. "
+    "Do not confuse speech recognition with text-to-speech. "
+    "Speech recognition means receiving the user's spoken input. "
+    "Text-to-speech means speaking your generated reply. "
+    "If you successfully generate an answer, do not say that you cannot answer. "
+    "Never say you heard the user's voice unless the message was actually spoken. "
+    "Typed messages are read, not heard. "
 )
 
 VISION_INSTRUCTION = (
