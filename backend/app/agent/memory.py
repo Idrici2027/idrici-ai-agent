@@ -1,18 +1,16 @@
-"""Persistent memory for Idrici AI (SQLite, standard library only).
-
-Only information the user explicitly asked to remember is stored. Secrets
-(passwords, API keys, tokens) are rejected. Search is keyword based with
-Arabic normalisation; it is NOT semantic (no embeddings).
-"""
+"""Persistent memory and conversation storage for Idrici AI."""
 from __future__ import annotations
 
 import os
 import re
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 
 MAX_MEMORY_CHARS = 1000
+MAX_CONVERSATION_TITLE_CHARS = 80
+MAX_CONVERSATION_MESSAGE_CHARS = 8000
 
 _DIACRITICS = re.compile("[\u064b-\u0652\u0640]")
 _TOKEN = re.compile(r"\w+", re.UNICODE)
@@ -62,10 +60,37 @@ class MemoryStore:
                 "created REAL NOT NULL,"
                 "updated REAL NOT NULL)"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS conversations ("
+                "id TEXT PRIMARY KEY,"
+                "owner_id TEXT NOT NULL,"
+                "title TEXT NOT NULL,"
+                "created REAL NOT NULL,"
+                "updated REAL NOT NULL)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conversations_owner_updated "
+                "ON conversations(owner_id, updated DESC)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS conversation_messages ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "conversation_id TEXT NOT NULL,"
+                "role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),"
+                "content TEXT NOT NULL,"
+                "created REAL NOT NULL,"
+                "FOREIGN KEY(conversation_id) REFERENCES conversations(id) "
+                "ON DELETE CASCADE)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conversation_messages_chat "
+                "ON conversation_messages(conversation_id, id)"
+            )
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
     @staticmethod
@@ -89,7 +114,7 @@ class MemoryStore:
                 row = conn.execute(
                     "SELECT id FROM memories WHERE norm = ?", (norm,)
                 ).fetchone()
-                if row:  # same fact again: refresh instead of duplicating
+                if row:
                     conn.execute(
                         "UPDATE memories SET updated = ? WHERE id = ?",
                         (now, row["id"]),
@@ -172,3 +197,148 @@ class MemoryStore:
                 scored.append((score, item["updated"], item))
         scored.sort(key=lambda s: (s[0], s[1]), reverse=True)
         return [s[2] for s in scored[:limit]]
+
+    # ------------------------------------------------ conversations
+
+    @staticmethod
+    def _validate_owner_id(owner_id: str) -> str:
+        owner_id = (owner_id or "").strip()
+        if not owner_id or len(owner_id) > 128:
+            raise ValueError("Invalid conversation owner")
+        return owner_id
+
+    @staticmethod
+    def _validate_conversation_message(
+        role: str, content: str
+    ) -> tuple[str, str]:
+        role = (role or "").strip().lower()
+        content = (content or "").strip()
+        if role not in {"user", "assistant"}:
+            raise ValueError("Invalid conversation message role")
+        if not content:
+            raise ValueError("Conversation message cannot be empty")
+        if len(content) > MAX_CONVERSATION_MESSAGE_CHARS:
+            raise ValueError("Conversation message is too long")
+        return role, content
+
+    def create_conversation(
+        self, owner_id: str, title: str = "محادثة جديدة"
+    ) -> dict:
+        owner_id = self._validate_owner_id(owner_id)
+        title = (title or "محادثة جديدة").strip()[:MAX_CONVERSATION_TITLE_CHARS]
+        if not title:
+            title = "محادثة جديدة"
+        conversation_id = uuid.uuid4().hex
+        now = time.time()
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO conversations(id, owner_id, title, created, updated) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (conversation_id, owner_id, title, now, now),
+                )
+        finally:
+            conn.close()
+        return self.get_conversation(owner_id, conversation_id)
+
+    def list_conversations(self, owner_id: str, limit: int = 100) -> list[dict]:
+        owner_id = self._validate_owner_id(owner_id)
+        limit = max(1, min(int(limit), 200))
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT c.id, c.title, c.created, c.updated, "
+                "COUNT(m.id) AS message_count "
+                "FROM conversations c LEFT JOIN conversation_messages m "
+                "ON m.conversation_id = c.id "
+                "WHERE c.owner_id = ? GROUP BY c.id "
+                "ORDER BY c.updated DESC LIMIT ?",
+                (owner_id, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(row) for row in rows]
+
+    def get_conversation(self, owner_id: str, conversation_id: str) -> dict | None:
+        owner_id = self._validate_owner_id(owner_id)
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT id, title, created, updated FROM conversations "
+                "WHERE id = ? AND owner_id = ?",
+                (conversation_id, owner_id),
+            ).fetchone()
+        finally:
+            conn.close()
+        return dict(row) if row else None
+
+    def list_conversation_messages(
+        self, owner_id: str, conversation_id: str
+    ) -> list[dict] | None:
+        if self.get_conversation(owner_id, conversation_id) is None:
+            return None
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT id, role, content, created FROM conversation_messages "
+                "WHERE conversation_id = ? ORDER BY id ASC",
+                (conversation_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(row) for row in rows]
+
+    def add_conversation_message(
+        self, owner_id: str, conversation_id: str, role: str, content: str
+    ) -> dict | None:
+        owner_id = self._validate_owner_id(owner_id)
+        role, content = self._validate_conversation_message(role, content)
+        now = time.time()
+        conn = self._conn()
+        try:
+            with conn:
+                conversation = conn.execute(
+                    "SELECT title FROM conversations WHERE id = ? AND owner_id = ?",
+                    (conversation_id, owner_id),
+                ).fetchone()
+                if conversation is None:
+                    return None
+                cur = conn.execute(
+                    "INSERT INTO conversation_messages "
+                    "(conversation_id, role, content, created) VALUES (?, ?, ?, ?)",
+                    (conversation_id, role, content, now),
+                )
+                title = conversation["title"]
+                if role == "user" and title == "محادثة جديدة":
+                    clean_title = " ".join(content.split())[:MAX_CONVERSATION_TITLE_CHARS]
+                    conn.execute(
+                        "UPDATE conversations SET title = ?, updated = ? WHERE id = ?",
+                        (clean_title or title, now, conversation_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE conversations SET updated = ? WHERE id = ?",
+                        (now, conversation_id),
+                    )
+                message_id = cur.lastrowid
+                row = conn.execute(
+                    "SELECT id, role, content, created FROM conversation_messages "
+                    "WHERE id = ?", (message_id,),
+                ).fetchone()
+        finally:
+            conn.close()
+        return dict(row)
+
+    def delete_conversation(self, owner_id: str, conversation_id: str) -> bool:
+        owner_id = self._validate_owner_id(owner_id)
+        conn = self._conn()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "DELETE FROM conversations WHERE id = ? AND owner_id = ?",
+                    (conversation_id, owner_id),
+                )
+        finally:
+            conn.close()
+        return cur.rowcount > 0
