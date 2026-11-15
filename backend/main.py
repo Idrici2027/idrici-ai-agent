@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.agent.core import AgentExecutor, TaskStore  # noqa: E402
 from app.agent.learning import learn_from_turn  # noqa: E402
-from app.agent.memory import MemoryStore  # noqa: E402
+from app.agent.memory import MemoryStore, is_history_question  # noqa: E402
 from app.agent.tools import build_registry, integration_status  # noqa: E402
 from app.models.model_provider import (  # noqa: E402
     GeminiModelProvider,
@@ -44,6 +44,18 @@ def require_api_key(
 
 @app.on_event("startup")
 async def warn_if_open() -> None:
+    try:
+        store = get_store()
+        count = len(store.list_conversations("default", limit=200))
+        print(
+            f"STORAGE: {store.path} holds {count} conversations. On Render "
+            "this file is ERASED on every restart/deploy unless it is on a "
+            "persistent disk (set IDRICI_DB_PATH). The app restores it from "
+            "its on-device backup.",
+            flush=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"STORAGE check failed: {type(exc).__name__}", flush=True)
     if not os.getenv("IDRICI_API_KEY"):
         print(
             "WARNING: IDRICI_API_KEY is not set; the API is open.",
@@ -519,6 +531,37 @@ async def delete_skill(
 
 
 # ---------------------------------------------------------
+# Backup / restore (the app keeps a copy on the phone)
+# ---------------------------------------------------------
+
+@app.get("/backup", dependencies=[Depends(require_api_key)])
+async def backup(
+    since: float | None = None,
+    include_conversations: bool = True,
+    owner_id: str = Depends(get_conversation_owner),
+):
+    """Conversations (optionally only those updated after `since`),
+    memories, experiences and skills."""
+    return get_store().export_data(
+        owner_id,
+        since=since,
+        include_conversations=include_conversations,
+    )
+
+
+@app.post("/restore", dependencies=[Depends(require_api_key)])
+async def restore(
+    body: dict[str, Any],
+    owner_id: str = Depends(get_conversation_owner),
+):
+    """Re-create data the server lost. Existing conversations are kept."""
+    try:
+        return get_store().import_data(owner_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+# ---------------------------------------------------------
 # Integrations
 # ---------------------------------------------------------
 
@@ -774,6 +817,7 @@ async def chat(
             owner_id,
             request.message,
             exclude_conversation_id=request.conversation_id,
+            history_question=is_history_question(request.message),
         )
     except Exception as exc:  # noqa: BLE001
         # Recall must never block an answer.
