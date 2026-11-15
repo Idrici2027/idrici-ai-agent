@@ -63,6 +63,46 @@ def looks_secret(text: str) -> bool:
     return bool(_SECRET_WORDS.search(text) or _SECRET_VALUES.search(text))
 
 
+# --- questions about earlier conversations -------------------------------
+# "What did we talk about in the other chats?" shares no keywords with the
+# old chats, so keyword search finds nothing. These patterns detect such
+# questions so the agent is given a digest of recent conversations instead.
+_CONV_WORDS = ("محادث", "دردش", "شات", "chat", "conversation", "talk")
+_PAST_WORDS = (
+    "سابق", "ماضي", "قبل", "اخري", "اخر", "باقي", "بقي", "تتذكر", "تذكر",
+    "ذاكر", "other", "previous", "earlier", "past", "last", "old",
+    "remember", "recall", "history",
+)
+_DIRECT_PHRASES = (
+    "تحدثنا", "تكلمنا", "ناقشنا", "حكينا", "قلت لك", "اخبرتك", "ذكرت لك",
+    "المره الماضيه", "we talked", "we discussed", "last time",
+    "i told you", "did i tell", "did i mention", "what do you remember",
+    "ماذا تتذكر", "ما الذي تتذكره", "شو تتذكر",
+)
+
+
+def is_history_question(text: str) -> bool:
+    """True when the user is asking about earlier conversations."""
+    norm = normalize(text or "")
+    if any(p in norm for p in _DIRECT_PHRASES):
+        return True
+    return (any(w in norm for w in _CONV_WORDS)
+            and any(w in norm for w in _PAST_WORDS))
+
+
+def _day(ts: float) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime(ts))
+
+
+def _snip(text: str, n: int) -> str:
+    return " ".join((text or "").split())[:n]
+
+
+def _safe_title(title: str, n: int = 60) -> str:
+    """Titles come from the first message, so they can hold a secret."""
+    return "(محادثة)" if looks_secret(title or "") else _snip(title, n)
+
+
 def default_db_path() -> Path:
     env = os.getenv("IDRICI_DB_PATH")
     if env:
@@ -839,18 +879,62 @@ class MemoryStore:
 
     # ------------------------------------------------ added: recall
 
+    def recent_conversations(
+        self,
+        owner_id: str,
+        exclude_conversation_id: str | None = None,
+        limit: int = 15,
+        detailed: int = 6,
+    ) -> list[dict]:
+        """
+        Most recent non-empty conversations other than the current one:
+        title, date and, for the newest `detailed` ones, the opening user
+        message and the last message. Secret-looking text is skipped.
+        """
+        owner_id = self._validate_owner_id(owner_id)
+        items = [
+            c for c in self.list_conversations(owner_id, limit=200)
+            if c["message_count"] > 0 and c["id"] != exclude_conversation_id
+        ][:limit]
+        conn = self._conn()
+        try:
+            for i, c in enumerate(items):
+                c["first_user"] = c["last"] = ""
+                c["last_role"] = ""
+                if i >= detailed:
+                    continue
+                first = conn.execute(
+                    "SELECT content FROM conversation_messages WHERE "
+                    "conversation_id = ? AND role = 'user' "
+                    "ORDER BY id ASC LIMIT 1", (c["id"],)).fetchone()
+                last = conn.execute(
+                    "SELECT role, content FROM conversation_messages WHERE "
+                    "conversation_id = ? ORDER BY id DESC LIMIT 1",
+                    (c["id"],)).fetchone()
+                if first and not looks_secret(first["content"]):
+                    c["first_user"] = first["content"]
+                if last and not looks_secret(last["content"]):
+                    c["last"], c["last_role"] = last["content"], last["role"]
+        finally:
+            conn.close()
+        return items
+
     def build_recall_context(
         self,
         owner_id: str,
         query: str,
         exclude_conversation_id: str | None = None,
         max_chars: int = 6000,
+        history_question: bool = False,
     ) -> str | None:
         """
         One text block with everything relevant the agent already knows:
         saved memories, earlier conversations, experiences and skills.
 
-        Returned as untrusted DATA. Returns None when nothing matches.
+        Always lists the titles of earlier conversations so the agent knows
+        they exist; when `history_question` is true (the user asks about
+        earlier chats) it also gets an excerpt of the most recent ones.
+        Returned as untrusted DATA. Returns None when there is nothing.
         """
         owner_id = self._validate_owner_id(owner_id)
         sections: list[str] = []
@@ -862,7 +946,29 @@ class MemoryStore:
                 + "\n".join(f"- {m['content']}" for m in facts)
             )
 
-        # Experiences: verified first so tested knowledge outranks guesses.
+        recent = self.recent_conversations(
+            owner_id, exclude_conversation_id,
+            limit=15 if history_question else 12,
+            detailed=6 if history_question else 0,
+        )
+        if recent:
+            lines = []
+            for c in recent:
+                line = (f"- {_day(c['updated'])} \"{_safe_title(c['title'])}\" "
+                        f"({c['message_count']} messages)")
+                if c.get("first_user"):
+                    line += f"\n    user began with: {_snip(c['first_user'], 200)}"
+                if c.get("last"):
+                    line += (f"\n    last {c['last_role']} message: "
+                             f"{_snip(c['last'], 200)}")
+                lines.append(line)
+            sections.append(
+                "## Your earlier conversations with this user, newest first "
+                "(you DO have access to them; this is the index"
+                + (" with excerpts" if history_question else "") + ")\n"
+                + "\n".join(lines)
+            )
+
         order = {"verified": 0, "useful": 1, "proposed": 2, "failed": 3}
         exps = self.search_experiences(owner_id, query, limit=6)
         exps.sort(key=lambda e: order.get(e["category"], 9))
@@ -893,16 +999,170 @@ class MemoryStore:
         )
         if hits:
             sections.append(
-                "## Earlier conversations\n"
+                "## Matching passages from earlier conversations\n"
                 + "\n".join(
-                    f"- (\"{h['conversation_title'][:50]}\", {h['role']}) "
-                    f"{' '.join(h['content'].split())[:350]}"
+                    f"- (\"{_safe_title(h['conversation_title'], 50)}\", {h['role']}) "
+                    f"{_snip(h['content'], 350)}"
                     for h in hits
                 )
             )
 
         if not sections:
             return None
-        text = "\n\n".join(sections)
-        return text[:max_chars]
+        if history_question:
+            max_chars = max(max_chars, 9000)
+        # Cut whole sections, never in the middle of one.
+        out, used = [], 0
+        for sec in sections:
+            if used + len(sec) > max_chars and out:
+                continue
+            out.append(sec[:max_chars])
+            used += len(sec) + 2
+        return "\n\n".join(out)
+
+    # ------------------------------------------------ added: backup/restore
+
+    def export_data(
+        self,
+        owner_id: str,
+        since: float | None = None,
+        include_conversations: bool = True,
+        max_conversations: int = 2000,
+    ) -> dict:
+        """Everything the owner has, for the app's on-device backup.
+        `since` limits conversations to those updated after that time."""
+        owner_id = self._validate_owner_id(owner_id)
+        conversations: list[dict] = []
+        conn = self._conn()
+        try:
+            if include_conversations:
+                sql = ("SELECT id, title, created, updated FROM conversations "
+                       "WHERE owner_id = ?")
+                args: list = [owner_id]
+                if since is not None:
+                    sql += " AND updated > ?"
+                    args.append(float(since))
+                sql += " ORDER BY updated DESC LIMIT ?"
+                args.append(int(max_conversations))
+                for row in conn.execute(sql, args).fetchall():
+                    conv = dict(row)
+                    conv["messages"] = [
+                        dict(m) for m in conn.execute(
+                            "SELECT role, content, created FROM "
+                            "conversation_messages WHERE conversation_id = ? "
+                            "ORDER BY id ASC", (conv["id"],)).fetchall()
+                    ]
+                    conversations.append(conv)
+        finally:
+            conn.close()
+        return {
+            "conversations": conversations,
+            "memories": self.list(),
+            "experiences": self.list_experiences(owner_id, limit=500),
+            "skills": self.list_skills(owner_id, limit=200),
+            "server_time": time.time(),
+        }
+
+    def import_data(self, owner_id: str, data: dict) -> dict:
+        """
+        Restore what the app kept on the phone after the server lost its
+        database. Existing conversations are never overwritten. Memories
+        go through the normal validation (secrets rejected, duplicates
+        merged).
+        """
+        owner_id = self._validate_owner_id(owner_id)
+        if not isinstance(data, dict):
+            raise ValueError("Invalid restore data")
+        now = time.time()
+        out = {"conversations": 0, "messages": 0, "memories": 0,
+               "experiences": 0, "skills": 0}
+
+        def num(value, default):
+            return float(value) if isinstance(value, (int, float)) else default
+
+        convs = data.get("conversations")
+        convs = convs if isinstance(convs, list) else []
+        conn = self._conn()
+        try:
+            with conn:
+                for conv in convs[:2000]:
+                    if not isinstance(conv, dict):
+                        continue
+                    cid = str(conv.get("id", ""))
+                    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", cid):
+                        continue
+                    if conn.execute("SELECT 1 FROM conversations WHERE id = ?",
+                                    (cid,)).fetchone():
+                        continue  # never overwrite what the server has
+                    msgs = []
+                    for m in (conv.get("messages") or [])[:5000]:
+                        if not isinstance(m, dict):
+                            continue
+                        role = str(m.get("role", ""))
+                        text = str(m.get("content", "")).strip()
+                        if (role in ("user", "assistant") and text
+                                and len(text) <= MAX_CONVERSATION_MESSAGE_CHARS):
+                            msgs.append((role, text, num(m.get("created"), now)))
+                    if not msgs:
+                        continue
+                    title = " ".join(str(conv.get("title", "")).split())
+                    title = title[:MAX_CONVERSATION_TITLE_CHARS] or "محادثة جديدة"
+                    created = num(conv.get("created"), msgs[0][2])
+                    updated = num(conv.get("updated"), msgs[-1][2])
+                    conn.execute(
+                        "INSERT INTO conversations(id, owner_id, title, "
+                        "created, updated) VALUES (?,?,?,?,?)",
+                        (cid, owner_id, title, created, updated))
+                    conn.executemany(
+                        "INSERT INTO conversation_messages(conversation_id, "
+                        "role, content, created) VALUES (?,?,?,?)",
+                        [(cid, r, t, c) for r, t, c in msgs])
+                    out["conversations"] += 1
+                    out["messages"] += len(msgs)
+        finally:
+            conn.close()
+
+        for item in (data.get("memories") or [])[:2000]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                self.add(str(item.get("content", "")),
+                         str(item.get("category", "note")))
+                out["memories"] += 1
+            except ValueError:
+                continue
+
+        known = {(e["title"], e["content"])
+                 for e in self.list_experiences(owner_id, limit=500)}
+        for item in (data.get("experiences") or [])[:500]:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title", "")).strip()
+            content = str(item.get("content", "")).strip()
+            if (title, content) in known:
+                continue
+            cid = item.get("conversation_id")
+            if cid is not None and self.get_conversation(owner_id, str(cid)) is None:
+                cid = None
+            try:
+                self.add_experience(
+                    owner_id, title, content,
+                    category=str(item.get("category", "proposed")),
+                    outcome=str(item.get("outcome", "") or ""),
+                    conversation_id=str(cid) if cid is not None else None)
+                out["experiences"] += 1
+            except ValueError:
+                continue
+
+        for item in (data.get("skills") or [])[:200]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                self.add_skill(owner_id, str(item.get("name", "")),
+                               str(item.get("description", "") or ""),
+                               str(item.get("content", "") or ""))
+                out["skills"] += 1
+            except ValueError:
+                continue
+        return out
 
