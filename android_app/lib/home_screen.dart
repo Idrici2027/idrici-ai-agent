@@ -5,6 +5,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'avatar_view.dart';
 import 'chat_api.dart';
+import 'local_backup.dart';
 import 'voice_service.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -19,6 +20,7 @@ class _HomeScreenState extends State<HomeScreen>
   static const Color _accent = Color(0xFF54D6B0);
 
   final ChatApi _api = ChatApi();
+  final LocalBackup _backup = LocalBackup();
   final VoiceService _voice = VoiceService();
   final AvatarController _avatar = AvatarController();
 
@@ -34,6 +36,7 @@ class _HomeScreenState extends State<HomeScreen>
   List<SavedConversation> _conversations = [];
   bool _loadingConversations = false;
   String? _conversationsError;
+  bool _syncing = false;
 
   String? _conversationId;
 
@@ -48,6 +51,47 @@ class _HomeScreenState extends State<HomeScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _avatar.tracking.addListener(_onTrackingChanged);
+    unawaited(_startup());
+  }
+
+  // ------------------------------------------------ on-device backup
+
+  /// Shows the phone's own copy of the conversations immediately (so the
+  /// side panel is never empty after reopening the app), then syncs with
+  /// the server in the background.
+  Future<void> _startup() async {
+    await _backup.load();
+    if (!mounted) return;
+    setState(() => _conversations = _backup.conversations());
+    unawaited(_syncWithServer());
+  }
+
+  /// 1) give the server anything it lost, 2) copy anything new from it.
+  /// The server may need up to a minute to wake up; failures are silent
+  /// because the phone's copy keeps everything usable meanwhile.
+  Future<void> _syncWithServer() async {
+    if (_syncing) return;
+    _syncing = true;
+    try {
+      await _backup.restoreMissing(_api);
+      await _backup.pull(_api);
+      if (mounted) {
+        setState(() => _conversations = _backup.conversations());
+      }
+    } catch (_) {
+      // Offline or server waking up: try again at the next opportunity.
+    } finally {
+      _syncing = false;
+    }
+  }
+
+  /// A few seconds after a reply: picks up the automatic title and
+  /// whatever the agent learned from the exchange.
+  Future<void> _pullSoon() async {
+    await Future<void>.delayed(const Duration(seconds: 8));
+    try {
+      await _backup.pull(_api);
+    } catch (_) {}
   }
 
   @override
@@ -298,15 +342,42 @@ class _HomeScreenState extends State<HomeScreen>
       _setAgent(AgentState.thinking);
       _scrollToBottom();
 
-      final reply = await _api.send(
-        text,
-        previous,
-        imageBase64: image,
-        fromVoice: fromVoice,
-        conversationId: conversationId,
-      );
+      String reply;
+      try {
+        reply = await _api.send(
+          text,
+          previous,
+          imageBase64: image,
+          fromVoice: fromVoice,
+          conversationId: conversationId,
+        );
+      } catch (e) {
+        if (!ChatApi.isConversationMissing(e)) rethrow;
+
+        // The server lost its database (e.g. it restarted). Give it this
+        // conversation back from the phone, or start a fresh one.
+        final restored = await _backup.restoreConversation(
+          _api,
+          conversationId,
+        );
+        if (!restored) {
+          final created = await _api.createConversation();
+          conversationId = created.id;
+          _conversationId = conversationId;
+        }
+        reply = await _api.send(
+          text,
+          previous,
+          imageBase64: image,
+          fromVoice: fromVoice,
+          conversationId: conversationId,
+        );
+      }
 
       if (!mounted) return;
+
+      _backup.recordTurn(conversationId, text, reply);
+      unawaited(_pullSoon());
 
       setState(() {
         _messages.add(ChatMessage('assistant', reply));
@@ -371,7 +442,16 @@ class _HomeScreenState extends State<HomeScreen>
       if (!mounted) return;
       setState(() => _partial = '');
 
-      final details = await _api.getConversation(id);
+      ConversationDetails details;
+      try {
+        details = await _api.getConversation(id);
+      } catch (e) {
+        // Server down or it lost this chat: use the phone's copy.
+        final local = _backup.details(id);
+        if (local == null) rethrow;
+        details = local;
+        unawaited(_syncWithServer());
+      }
 
       if (!mounted) return;
 
@@ -403,12 +483,24 @@ class _HomeScreenState extends State<HomeScreen>
     });
 
     try {
-      final items = await _api.listConversations();
+      final server = await _api.listConversations();
       if (!mounted) return;
-      setState(() => _conversations = items);
+
+      final merged = _backup.mergeWithServer(server);
+      setState(() => _conversations = merged);
+
+      // The phone knows chats the server does not: the server lost them.
+      final serverIds = server.map((c) => c.id).toSet();
+      if (merged.any((c) => !serverIds.contains(c.id))) {
+        unawaited(_syncWithServer());
+      }
     } catch (e) {
       if (!mounted) return;
-      setState(() => _conversationsError = '$e');
+      // Offline: show the phone's own copy.
+      setState(() {
+        _conversations = _backup.conversations();
+        _conversationsError = _conversations.isEmpty ? '$e' : null;
+      });
     } finally {
       if (mounted) setState(() => _loadingConversations = false);
     }
@@ -454,7 +546,14 @@ class _HomeScreenState extends State<HomeScreen>
     if (title == null || title.isEmpty || title == c.title) return;
 
     try {
-      await _api.renameConversation(c.id, title);
+      try {
+        await _api.renameConversation(c.id, title);
+      } catch (e) {
+        if (!ChatApi.isConversationMissing(e)) rethrow;
+        await _backup.restoreConversation(_api, c.id);
+        await _api.renameConversation(c.id, title);
+      }
+      _backup.rename(c.id, title);
       await _refreshConversations();
     } catch (e) {
       _showSnack('تعذر تغيير الاسم: $e');
@@ -487,7 +586,13 @@ class _HomeScreenState extends State<HomeScreen>
     if (ok != true) return;
 
     try {
-      await _api.deleteConversation(c.id);
+      try {
+        await _api.deleteConversation(c.id);
+      } catch (e) {
+        // Already gone from the server: still remove it from the phone.
+        if (!ChatApi.isConversationMissing(e)) rethrow;
+      }
+      _backup.remove(c.id);
       if (!mounted) return;
 
       if (_conversationId == c.id) {
@@ -586,6 +691,9 @@ class _HomeScreenState extends State<HomeScreen>
                                         onPressed: () async {
                                           try {
                                             await _api.deleteMemory(m.id);
+                                            _backup.removeMemoryByContent(
+                                              m.content,
+                                            );
                                             setSheetState(
                                               () => memories.removeAt(i),
                                             );

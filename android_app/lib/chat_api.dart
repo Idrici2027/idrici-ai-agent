@@ -100,8 +100,15 @@ class ChatApi {
 
   static const int maxHistory = 20;
 
-  Uri _endpoint(String path) {
-    return Uri.parse(_url).replace(path: path, query: null);
+  Uri _endpoint(String path, {Map<String, String>? query}) {
+    return Uri.parse(_url).replace(path: path, queryParameters: query);
+  }
+
+  /// True when the server answered "conversation not found" - which is what
+  /// happens after the server lost its database.
+  static bool isConversationMissing(Object error) {
+    return error is ChatApiException &&
+        error.message.toLowerCase().contains('conversation not found');
   }
 
   Map<String, String> get _headers => {
@@ -252,6 +259,26 @@ class ChatApi {
         '/conversations/${Uri.encodeComponent(conversationId)}',
       ),
     );
+  }
+
+  /// Everything the server holds (used to refresh the on-device backup).
+  /// [since] is a server timestamp: only newer conversations are returned.
+  Future<Map<String, dynamic>> backup({
+    double? since,
+    bool includeConversations = true,
+  }) {
+    return _request(
+      'GET',
+      _endpoint('/backup', query: {
+        if (since != null) 'since': since.toString(),
+        'include_conversations': includeConversations.toString(),
+      }),
+    );
+  }
+
+  /// Gives the server data it lost (conversations, memories, ...).
+  Future<Map<String, dynamic>> restore(Map<String, dynamic> data) {
+    return _request('POST', _endpoint('/restore'), body: data);
   }
 
   /// Rename one saved conversation.
