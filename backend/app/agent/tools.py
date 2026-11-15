@@ -52,7 +52,8 @@ class ToolRegistry:
 
 def build_registry(github: GitHubClient | None = None,
                    render: RenderClient | None = None,
-                   store: MemoryStore | None = None) -> ToolRegistry:
+                   store: MemoryStore | None = None,
+                   owner_id: str = "default") -> ToolRegistry:
     """Registers tools only for integrations that are actually connected."""
     github = github or GitHubClient()
     render = render or RenderClient()
@@ -66,6 +67,24 @@ def build_registry(github: GitHubClient | None = None,
             return store.search(query)
         add("memory_search", "Search the user's saved memories.",
             {"query": "text"}, READ, mem_search)
+
+        async def past_chats(query: str):
+            return store.search_conversation_context(owner_id, query)
+        add("conversation_search",
+            "Search the user's earlier conversations.",
+            {"query": "text"}, READ, past_chats)
+
+        async def exp_search(query: str):
+            return store.search_experiences(owner_id, query)
+        add("experience_search",
+            "Search lessons learned earlier (category verified/proposed/"
+            "failed/useful; 'proposed' is NOT verified).",
+            {"query": "text"}, READ, exp_search)
+
+        async def skill_search(query: str):
+            return store.search_skills(owner_id, query)
+        add("skill_search", "Search the user's saved skills.",
+            {"query": "text"}, READ, skill_search)
 
     if github.configured:
         add("github_list_repos", "List repositories the token can see.",

@@ -8,9 +8,13 @@ import time
 import uuid
 from pathlib import Path
 
-MAX_MEMORY_CHARS = 1000
+MAX_MEMORY_CHARS = 2000
 MAX_CONVERSATION_TITLE_CHARS = 80
 MAX_CONVERSATION_MESSAGE_CHARS = 8000
+
+# How many stored messages are scanned when recalling past conversations.
+# (Was 2000; raised so older chats stay reachable.)
+RECALL_SCAN_LIMIT = 20000
 
 # Experiences and skills limits.
 MAX_EXPERIENCE_TITLE_CHARS = 120
@@ -44,7 +48,15 @@ def normalize(text: str) -> str:
 
 
 def tokens(text: str) -> set[str]:
-    return {t for t in _TOKEN.findall(normalize(text)) if len(t) >= 2}
+    out: set[str] = set()
+    for t in _TOKEN.findall(normalize(text)):
+        if len(t) < 2:
+            continue
+        out.add(t)
+        # "القهوه" should also match "قهوه".
+        if t.startswith("ال") and len(t) >= 5:
+            out.add(t[2:])
+    return out
 
 
 def looks_secret(text: str) -> bool:
@@ -284,12 +296,13 @@ class MemoryStore:
                 WHERE c.owner_id = ?
                   AND (? IS NULL OR c.id != ?)
                 ORDER BY m.created DESC
-                LIMIT 2000
+                LIMIT ?
                 """,
                 (
                     owner_id,
                     exclude_conversation_id,
                     exclude_conversation_id,
+                    RECALL_SCAN_LIMIT,
                 ),
             ).fetchall()
         finally:
@@ -324,7 +337,10 @@ class MemoryStore:
                 )
             )
 
-            if score:
+            # Long queries need at least two matching words, so one common
+            # word does not pull in unrelated chats.
+            needed = 2 if len(wanted) >= 4 else 1
+            if score >= needed:
                 scored.append((score, item["created"], item))
 
         scored.sort(
@@ -757,3 +773,136 @@ class MemoryStore:
                 scored.append((score, item["updated"], item))
         scored.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
         return [item for _, _, item in scored[:limit]]
+
+    # ------------------------------------------------ added: management
+
+    def rename_conversation(
+        self, owner_id: str, conversation_id: str, title: str
+    ) -> dict | None:
+        owner_id = self._validate_owner_id(owner_id)
+        title = " ".join((title or "").split())[:MAX_CONVERSATION_TITLE_CHARS]
+        if not title:
+            raise ValueError("Conversation title cannot be empty")
+        conn = self._conn()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "UPDATE conversations SET title = ? "
+                    "WHERE id = ? AND owner_id = ?",
+                    (title, conversation_id, owner_id),
+                )
+        finally:
+            conn.close()
+        return (self.get_conversation(owner_id, conversation_id)
+                if cur.rowcount else None)
+
+    def list_experiences(self, owner_id: str, limit: int = 100) -> list[dict]:
+        owner_id = self._validate_owner_id(owner_id)
+        limit = max(1, min(int(limit), 500))
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT id, title, content, category, outcome,"
+                " conversation_id, created, updated FROM experiences"
+                " WHERE owner_id = ? ORDER BY updated DESC LIMIT ?",
+                (owner_id, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+
+    def delete_experience(self, owner_id: str, experience_id: int) -> bool:
+        owner_id = self._validate_owner_id(owner_id)
+        conn = self._conn()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "DELETE FROM experiences WHERE id = ? AND owner_id = ?",
+                    (experience_id, owner_id),
+                )
+        finally:
+            conn.close()
+        return cur.rowcount > 0
+
+    def delete_skill(self, owner_id: str, skill_id: int) -> bool:
+        owner_id = self._validate_owner_id(owner_id)
+        conn = self._conn()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "DELETE FROM skills WHERE id = ? AND owner_id = ?",
+                    (skill_id, owner_id),
+                )
+        finally:
+            conn.close()
+        return cur.rowcount > 0
+
+    # ------------------------------------------------ added: recall
+
+    def build_recall_context(
+        self,
+        owner_id: str,
+        query: str,
+        exclude_conversation_id: str | None = None,
+        max_chars: int = 6000,
+    ) -> str | None:
+        """
+        One text block with everything relevant the agent already knows:
+        saved memories, earlier conversations, experiences and skills.
+
+        Returned as untrusted DATA. Returns None when nothing matches.
+        """
+        owner_id = self._validate_owner_id(owner_id)
+        sections: list[str] = []
+
+        facts = self.search(query, limit=8)
+        if facts:
+            sections.append(
+                "## Saved memories (facts about the user)\n"
+                + "\n".join(f"- {m['content']}" for m in facts)
+            )
+
+        # Experiences: verified first so tested knowledge outranks guesses.
+        order = {"verified": 0, "useful": 1, "proposed": 2, "failed": 3}
+        exps = self.search_experiences(owner_id, query, limit=6)
+        exps.sort(key=lambda e: order.get(e["category"], 9))
+        if exps:
+            lines = []
+            for e in exps:
+                line = f"- [{e['category']}] {e['title']}: {e['content'][:500]}"
+                if e["outcome"]:
+                    line += f" (outcome: {e['outcome'][:200]})"
+                lines.append(line)
+            sections.append(
+                "## Past experiences ('proposed' = NOT verified, "
+                "'failed' = did not work)\n" + "\n".join(lines)
+            )
+
+        skills = self.search_skills(owner_id, query, limit=3)
+        if skills:
+            sections.append(
+                "## Skills\n"
+                + "\n".join(
+                    f"- {k['name']}: {k['description']} {k['content'][:600]}"
+                    for k in skills
+                )
+            )
+
+        hits = self.search_conversation_context(
+            owner_id, query, exclude_conversation_id, limit=6
+        )
+        if hits:
+            sections.append(
+                "## Earlier conversations\n"
+                + "\n".join(
+                    f"- (\"{h['conversation_title'][:50]}\", {h['role']}) "
+                    f"{' '.join(h['content'].split())[:350]}"
+                    for h in hits
+                )
+            )
+
+        if not sections:
+            return None
+        text = "\n\n".join(sections)
+        return text[:max_chars]
+
