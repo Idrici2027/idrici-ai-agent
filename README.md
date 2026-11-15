@@ -53,7 +53,10 @@ android_app/
 | Render tools (services/deploys/logs/health/deploy) | IMPLEMENTED BUT NOT VERIFIED against the real API |
 | API key, provider choice, voice vs typed input | IMPLEMENTED BUT NOT VERIFIED (no FastAPI in the build sandbox) |
 | OAuth flows, Google/email/calendar/cloud/design integrations | NOT IMPLEMENTED |
-| Semantic (embedding) memory search | NOT IMPLEMENTED (keyword search only) |
+| Long-term recall in /chat (memories + earlier conversations + experiences + skills injected as untrusted data) | IMPLEMENTED AND TESTED (store level); /chat wiring NOT VERIFIED (no FastAPI in the build sandbox) |
+| Auto-learning after each reply (facts -> memories 'learned', lessons -> experiences 'proposed', secrets rejected, set `IDRICI_AUTO_LEARN=0` to disable) | IMPLEMENTED AND TESTED with a fake model; NOT VERIFIED with the real model |
+| Side panel with all conversations (rename/delete) + agent-memory sheet in the app | IMPLEMENTED, NOT COMPILED (no Flutter SDK in the build sandbox) |
+| Semantic (embedding) memory search | NOT IMPLEMENTED (keyword search only, Arabic "ال" aware) |
 | Document creation, file organisation, web research tools | NOT IMPLEMENTED |
 | Avatar animation/lip-sync upgrades | NOT IMPLEMENTED |
 | Android 8.1 install test, Flutter build | NOT VERIFIED |
@@ -68,7 +71,7 @@ android_app/
 
 ## Endpoints
 
-`POST /chat` · `GET/POST /memories`, `PUT/DELETE /memories/{id}` ·
+`POST /chat` · `GET/POST/PATCH/DELETE /conversations` · `GET/DELETE /experiences` · `GET/POST/DELETE /skills` · `GET/POST /memories`, `PUT/DELETE /memories/{id}` ·
 `GET /integrations` · `POST /agent` (starts a task) ·
 `POST /agent/{id}/confirm` `{"approve": true|false}` · `GET /agent/{id}`.
 Every write (commit, branch, PR, deploy, tests) is only prepared and runs
