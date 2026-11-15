@@ -55,6 +55,30 @@ class ConversationDetails {
   final List<ChatMessage> messages;
 }
 
+/// One saved memory (a fact the agent keeps; "learned" ones were added
+/// automatically).
+class SavedMemory {
+  const SavedMemory({
+    required this.id,
+    required this.content,
+    required this.category,
+  });
+
+  final int id;
+  final String content;
+  final String category;
+
+  bool get isLearned => category == 'learned';
+
+  factory SavedMemory.fromJson(Map<String, dynamic> json) {
+    return SavedMemory(
+      id: (json['id'] as num?)?.toInt() ?? 0,
+      content: json['content']?.toString() ?? '',
+      category: json['category']?.toString() ?? 'note',
+    );
+  }
+}
+
 class ChatApiException implements Exception {
   ChatApiException(this.message);
 
@@ -102,6 +126,15 @@ class ChatApi {
         case 'POST':
           response = await http
               .post(
+                uri,
+                headers: _headers,
+                body: jsonEncode(body ?? {}),
+              )
+              .timeout(const Duration(seconds: 90));
+          break;
+        case 'PATCH':
+          response = await http
+              .patch(
                 uri,
                 headers: _headers,
                 body: jsonEncode(body ?? {}),
@@ -219,6 +252,35 @@ class ChatApi {
         '/conversations/${Uri.encodeComponent(conversationId)}',
       ),
     );
+  }
+
+  /// Rename one saved conversation.
+  Future<void> renameConversation(
+    String conversationId,
+    String title,
+  ) async {
+    await _request(
+      'PATCH',
+      _endpoint(
+        '/conversations/${Uri.encodeComponent(conversationId)}',
+      ),
+      body: {'title': title},
+    );
+  }
+
+  /// Everything the agent remembers (saved + learned facts).
+  Future<List<SavedMemory>> listMemories() async {
+    final data = await _request('GET', _endpoint('/memories'));
+    final items = data['memories'];
+    if (items is! List) return [];
+    return items
+        .whereType<Map<String, dynamic>>()
+        .map(SavedMemory.fromJson)
+        .toList();
+  }
+
+  Future<void> deleteMemory(int id) async {
+    await _request('DELETE', _endpoint('/memories/$id'));
   }
 
   /// Send a message and return the assistant reply.

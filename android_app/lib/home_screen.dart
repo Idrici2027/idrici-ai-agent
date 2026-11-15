@@ -30,7 +30,10 @@ class _HomeScreenState extends State<HomeScreen>
   int _languageIndex = 0;
   bool _handsFree = false;
   bool _aiSeesMe = true;
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  List<SavedConversation> _conversations = [];
   bool _loadingConversations = false;
+  String? _conversationsError;
 
   String? _conversationId;
 
@@ -340,22 +343,17 @@ class _HomeScreenState extends State<HomeScreen>
     await _voice.cancelListening();
     await _voice.stopSpeaking();
 
-    try {
-      final created = await _api.createConversation();
+    if (!mounted) return;
 
-      if (!mounted) return;
+    // The conversation is created on the server with the first message,
+    // so empty chats never pile up in the list.
+    setState(() {
+      _conversationId = null;
+      _messages.clear();
+      _partial = '';
+    });
 
-      setState(() {
-        _conversationId = created.id;
-        _messages.clear();
-        _partial = '';
-      });
-
-      _setAgent(AgentState.idle);
-      _showSnack('تم إنشاء محادثة جديدة وحفظها.');
-    } catch (e) {
-      _showSnack('تعذر إنشاء المحادثة: $e');
-    }
+    _setAgent(AgentState.idle);
   }
 
   // ------------------------------------------------ UPDATED: load conversation
@@ -396,106 +394,348 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  Future<void> _showConversations() async {
-    if (_loadingConversations ||
-        _state == AgentState.thinking) {
-      return;
-    }
-
-    setState(() => _loadingConversations = true);
+  /// Reloads the list shown in the side panel.
+  Future<void> _refreshConversations() async {
+    if (!mounted) return;
+    setState(() {
+      _loadingConversations = true;
+      _conversationsError = null;
+    });
 
     try {
-      final conversations = await _api.listConversations();
+      final items = await _api.listConversations();
+      if (!mounted) return;
+      setState(() => _conversations = items);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _conversationsError = '$e');
+    } finally {
+      if (mounted) setState(() => _loadingConversations = false);
+    }
+  }
 
+  void _openConversationsPanel() {
+    _scaffoldKey.currentState?.openDrawer();
+  }
+
+  void _closePanel() {
+    if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
+      Navigator.of(context).pop();
+    }
+  }
+
+  Future<void> _renameConversation(SavedConversation c) async {
+    final controller = TextEditingController(text: c.title);
+    final title = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF202632),
+        title: const Text('إعادة تسمية المحادثة'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 80,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('إلغاء'),
+          ),
+          TextButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(controller.text.trim()),
+            child: const Text('حفظ'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+
+    if (title == null || title.isEmpty || title == c.title) return;
+
+    try {
+      await _api.renameConversation(c.id, title);
+      await _refreshConversations();
+    } catch (e) {
+      _showSnack('تعذر تغيير الاسم: $e');
+    }
+  }
+
+  Future<void> _deleteConversation(SavedConversation c) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF202632),
+        title: const Text('حذف المحادثة؟'),
+        content: Text(c.title, maxLines: 2, overflow: TextOverflow.ellipsis),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('إلغاء'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text(
+              'حذف',
+              style: TextStyle(color: Colors.redAccent),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (ok != true) return;
+
+    try {
+      await _api.deleteConversation(c.id);
       if (!mounted) return;
 
-      await showDialog<void>(
-        context: context,
-        builder: (dialogContext) {
-          return AlertDialog(
-            backgroundColor: const Color(0xFF202632),
-            title: const Text('المحادثات المحفوظة'),
-            content: SizedBox(
-              width: double.maxFinite,
-              height: 360,
-              child: conversations.isEmpty
-                  ? const Center(
-                      child: Text('لا توجد محادثات محفوظة بعد.'),
-                    )
-                  : ListView.builder(
-                      itemCount: conversations.length,
-                      itemBuilder: (context, index) {
-                        final conversation = conversations[index];
+      if (_conversationId == c.id) {
+        setState(() {
+          _conversationId = null;
+          _messages.clear();
+        });
+      }
+      await _refreshConversations();
+    } catch (e) {
+      _showSnack('تعذر الحذف: $e');
+    }
+  }
 
-                        return ListTile(
-                          leading: const Icon(
-                            Icons.chat_bubble_outline,
-                            color: _accent,
-                          ),
-                          title: Text(
-                            conversation.title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text(
-                            '${conversation.messageCount} رسالة',
-                          ),
-                          trailing: IconButton(
-                            tooltip: 'حذف المحادثة',
-                            icon: const Icon(
-                              Icons.delete_outline,
-                              color: Colors.redAccent,
-                            ),
-                            onPressed: () async {
-                              try {
-                                await _api.deleteConversation(
-                                  conversation.id,
-                                );
+  Future<void> _showMemories() async {
+    final sheetMessenger = ScaffoldMessenger.of(context);
+    List<SavedMemory> memories = [];
+    String? error;
 
-                                if (!mounted) return;
+    try {
+      memories = await _api.listMemories();
+    } catch (e) {
+      error = '$e';
+    }
 
-                                if (_conversationId ==
-                                    conversation.id) {
-                                  setState(() {
-                                    _conversationId = null;
-                                    _messages.clear();
-                                  });
-                                }
+    if (!mounted) return;
 
-                                Navigator.of(dialogContext).pop();
-                                _showSnack('تم حذف المحادثة.');
-                              } catch (e) {
-                                _showSnack('تعذر الحذف: $e');
-                              }
-                            },
-                          ),
-                          onTap: () {
-                            Navigator.of(dialogContext).pop();
-                            unawaited(
-                              _loadConversation(conversation.id),
-                            );
-                          },
-                        );
-                      },
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF202632),
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            return SafeArea(
+              child: SizedBox(
+                height: MediaQuery.of(context).size.height * 0.7,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(20, 18, 20, 4),
+                      child: Text(
+                        'ما يتذكره الوكيل',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
                     ),
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(20, 0, 20, 8),
+                      child: Text(
+                        'يتعلم الوكيل تلقائيًا من محادثاتك. '
+                        'احذف أي شيء غير صحيح.',
+                        style: TextStyle(
+                          color: Colors.white54,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: error != null
+                          ? Center(child: Text('تعذر التحميل: $error'))
+                          : memories.isEmpty
+                              ? const Center(
+                                  child: Text('لا توجد ذكريات بعد.'),
+                                )
+                              : ListView.builder(
+                                  itemCount: memories.length,
+                                  itemBuilder: (context, i) {
+                                    final m = memories[i];
+                                    return ListTile(
+                                      leading: Icon(
+                                        m.isLearned
+                                            ? Icons.auto_awesome
+                                            : Icons.push_pin_outlined,
+                                        color: _accent,
+                                        size: 20,
+                                      ),
+                                      title: Text(m.content),
+                                      subtitle: Text(
+                                        m.isLearned
+                                            ? 'تعلّمه تلقائيًا'
+                                            : 'طلبتَ حفظه',
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                      trailing: IconButton(
+                                        tooltip: 'حذف',
+                                        icon: const Icon(
+                                          Icons.delete_outline,
+                                          color: Colors.redAccent,
+                                        ),
+                                        onPressed: () async {
+                                          try {
+                                            await _api.deleteMemory(m.id);
+                                            setSheetState(
+                                              () => memories.removeAt(i),
+                                            );
+                                          } catch (e) {
+                                            sheetMessenger.showSnackBar(
+                                              SnackBar(
+                                                content:
+                                                    Text('تعذر الحذف: $e'),
+                                              ),
+                                            );
+                                          }
+                                        },
+                                      ),
+                                    );
+                                  },
+                                ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildConversationsDrawer() {
+    return Drawer(
+      backgroundColor: const Color(0xFF171C25),
+      width: 310,
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
+              child: FilledButton.icon(
+                onPressed: () {
+                  _closePanel();
+                  unawaited(_newConversation());
+                },
+                style: FilledButton.styleFrom(
+                  backgroundColor: _accent,
+                  foregroundColor: const Color(0xFF10131A),
+                  minimumSize: const Size.fromHeight(46),
+                ),
+                icon: const Icon(Icons.add),
+                label: const Text('محادثة جديدة'),
+              ),
             ),
-            actions: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(18, 8, 18, 4),
+              child: Text(
+                'المحادثات',
+                style: TextStyle(color: Colors.white54, fontSize: 13),
+              ),
+            ),
+            Expanded(child: _buildConversationList()),
+            const Divider(height: 1, color: Color(0xFF292F3A)),
+            ListTile(
+              leading: const Icon(Icons.psychology_outlined, color: _accent),
+              title: const Text('ذاكرة الوكيل'),
+              onTap: () {
+                _closePanel();
+                unawaited(_showMemories());
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildConversationList() {
+    if (_loadingConversations && _conversations.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_conversationsError != null && _conversations.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'تعذر جلب المحادثات:\n$_conversationsError',
+                textAlign: TextAlign.center,
+              ),
               TextButton(
-                onPressed: () =>
-                    Navigator.of(dialogContext).pop(),
-                child: const Text('إغلاق'),
+                onPressed: _refreshConversations,
+                child: const Text('إعادة المحاولة'),
               ),
             ],
+          ),
+        ),
+      );
+    }
+
+    if (_conversations.isEmpty) {
+      return const Center(child: Text('لا توجد محادثات محفوظة بعد.'));
+    }
+
+    return RefreshIndicator(
+      onRefresh: _refreshConversations,
+      child: ListView.builder(
+        itemCount: _conversations.length,
+        itemBuilder: (context, index) {
+          final c = _conversations[index];
+          final selected = c.id == _conversationId;
+
+          return ListTile(
+            selected: selected,
+            selectedTileColor: const Color(0xFF202632),
+            dense: true,
+            title: Text(
+              c.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: PopupMenuButton<String>(
+              icon: const Icon(Icons.more_horiz, size: 20),
+              color: const Color(0xFF202632),
+              onSelected: (value) {
+                if (value == 'rename') {
+                  unawaited(_renameConversation(c));
+                } else if (value == 'delete') {
+                  unawaited(_deleteConversation(c));
+                }
+              },
+              itemBuilder: (_) => const [
+                PopupMenuItem(value: 'rename', child: Text('إعادة تسمية')),
+                PopupMenuItem(
+                  value: 'delete',
+                  child: Text(
+                    'حذف',
+                    style: TextStyle(color: Colors.redAccent),
+                  ),
+                ),
+              ],
+            ),
+            onTap: () {
+              _closePanel();
+              unawaited(_loadConversation(c.id));
+            },
           );
         },
-      );
-    } catch (e) {
-      _showSnack('تعذر جلب المحادثات: $e');
-    } finally {
-      if (mounted) {
-        setState(() => _loadingConversations = false);
-      }
-    }
+      ),
+    );
   }
 
   // ------------------------------------------------ voice output
@@ -580,8 +820,19 @@ class _HomeScreenState extends State<HomeScreen>
         media.size.height * (keyboardOpen ? 0.16 : 0.36);
 
     return Scaffold(
+      key: _scaffoldKey,
+      drawer: _buildConversationsDrawer(),
+      onDrawerChanged: (open) {
+        if (open) unawaited(_refreshConversations());
+      },
       appBar: AppBar(
         backgroundColor: const Color(0xFF171C25),
+        automaticallyImplyLeading: false,
+        leading: IconButton(
+          tooltip: 'المحادثات',
+          onPressed: _openConversationsPanel,
+          icon: const Icon(Icons.chat_bubble_outline),
+        ),
         title: const Row(
           children: [
             Icon(Icons.auto_awesome, color: _accent),
@@ -593,21 +844,6 @@ class _HomeScreenState extends State<HomeScreen>
           ],
         ),
         actions: [
-          IconButton(
-            tooltip: 'المحادثات السابقة',
-            onPressed: _loadingConversations
-                ? null
-                : _showConversations,
-            icon: _loadingConversations
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                    ),
-                  )
-                : const Icon(Icons.history),
-          ),
           ValueListenableBuilder<TrackingStatus>(
             valueListenable: _avatar.tracking,
             builder: (context, status, _) {
@@ -667,11 +903,6 @@ class _HomeScreenState extends State<HomeScreen>
                   : Icons.hearing_disabled_outlined,
               color: _handsFree ? _accent : null,
             ),
-          ),
-          IconButton(
-            tooltip: 'محادثة جديدة',
-            onPressed: _newConversation,
-            icon: const Icon(Icons.add_comment_outlined),
           ),
         ],
       ),
