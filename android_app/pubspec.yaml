@@ -1,7 +1,7 @@
 name: idrici_ai
 description: Idrici AI Android application
 publish_to: 'none'
-version: 0.2.0+2
+version: 0.3.0+3
 
 environment:
   sdk: '>=3.4.0 <4.0.0'
@@ -15,6 +15,7 @@ dependencies:
   permission_handler: ^11.3.1
   speech_to_text: ^7.0.0
   flutter_tts: ^4.2.0
+  path_provider: ^2.1.4
 
 dev_dependencies:
   flutter_test:
