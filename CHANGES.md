@@ -1,15 +1,20 @@
 # التعديلات / Changes
 
-## الخادم (backend)
-- `backend/app/agent/memory.py` — بحث أوسع (حتى 20000 رسالة بدل 2000)، تجاهل "ال" في العربية، `build_recall_context` (ذكريات + محادثات سابقة + تجارب + مهارات)، إعادة تسمية المحادثة، حذف/عرض التجارب والمهارات، حد الذاكرة 2000 حرف.
-- `backend/app/agent/learning.py` — **جديد**: تعلّم تلقائي بعد كل رد (يرفض الأسرار، التجارب دائماً `proposed`). إيقافه: `IDRICI_AUTO_LEARN=0`.
-- `backend/main.py` — `/chat` يحقن الذاكرة الطويلة ويتعلم في الخلفية؛ نقاط جديدة: `PATCH /conversations/{id}`، `/experiences`، `/skills`.
-- `backend/app/agent/tools.py` — أدوات بحث للوكيل: `conversation_search`, `experience_search`, `skill_search`.
-- `backend/tests/test_recall_learning.py` — **جديد**: اختبارات.
+## الإصدار الثاني: إصلاح مشكلتين
+1. **المحادثات تختفي عند الخروج من التطبيق** — السبب: قرص Render يُمسح عند كل إعادة تشغيل/نشر/نوم. الحل: التطبيق يحتفظ بنسخة كاملة على الهاتف (`idrici_backup.json`) ويعيدها للخادم تلقائياً عند فتح التطبيق أو عند اكتشاف أن الخادم فقدها. اللوحة الجانبية تعرض نسخة الهاتف فوراً حتى لو الخادم نائم.
+2. **المحادثة الجديدة لا تتذكر المحادثات الأخرى** — السبب: البحث بالكلمات لا يجد شيئاً لسؤال مثل "ماذا تحدثنا سابقاً؟"، والنموذج لم يُخبَر أن لديه ذاكرة. الحل: فهرس بعناوين المحادثات السابقة يُعطى للنموذج دائماً، ومقتطفات منها عند السؤال عنها، وتعليمات هوية جديدة.
 
-## التطبيق (android_app)
-- `lib/home_screen.dart` — أيقونة رسالة أعلى اليسار تفتح لوحة جانبية بكل المحادثات (إعادة تسمية/حذف/محادثة جديدة)، وزر "ذاكرة الوكيل" لعرض ما تعلمه وحذفه. المحادثة الجديدة تُنشأ مع أول رسالة.
-- `lib/chat_api.dart` — `renameConversation`, `listMemories`, `deleteMemory`, دعم PATCH.
+### الخادم
+- `backend/app/agent/memory.py` — `is_history_question`, `recent_conversations`, فهرس/مقتطفات في `build_recall_context`, `export_data`, `import_data`, إخفاء العناوين التي تشبه الأسرار.
+- `backend/main.py` — `GET /backup`, `POST /restore`, تمرير نوع السؤال للاسترجاع، سطر `STORAGE:` في سجل البدء.
+- `backend/app/models/model_provider.py` — تعليمات: لديك ذاكرة طويلة المدى ولا تقل إنك لا تتذكر.
+- `backend/tests/test_backup_history.py` (جديد، 10 اختبارات)، `backend/tests/test_backup_api.py` (جديد).
 
-## أخرى
-- `README.md` — حالة الميزات.
+### التطبيق
+- `android_app/lib/local_backup.dart` — **جديد**: النسخة المحلية والمزامنة والاستعادة.
+- `android_app/lib/chat_api.dart` — `backup`, `restore`, `isConversationMissing`.
+- `android_app/lib/home_screen.dart` — المزامنة عند الفتح، إعادة المحادثة للخادم تلقائياً إذا فقدها أثناء الإرسال، القائمة تدمج الخادم مع الهاتف، الحذف/التسمية تعمل حتى لو الخادم فقدها.
+- `android_app/pubspec.yaml` — إضافة `path_provider`، الإصدار 0.3.0+3.
+
+## الإصدار الأول
+- ذاكرة طويلة المدى، تعلم تلقائي، لوحة جانبية للمحادثات (انظر `README.md`).

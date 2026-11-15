@@ -56,6 +56,8 @@ android_app/
 | Long-term recall in /chat (memories + earlier conversations + experiences + skills injected as untrusted data) | IMPLEMENTED AND TESTED (store level); /chat wiring NOT VERIFIED (no FastAPI in the build sandbox) |
 | Auto-learning after each reply (facts -> memories 'learned', lessons -> experiences 'proposed', secrets rejected, set `IDRICI_AUTO_LEARN=0` to disable) | IMPLEMENTED AND TESTED with a fake model; NOT VERIFIED with the real model |
 | Side panel with all conversations (rename/delete) + agent-memory sheet in the app | IMPLEMENTED, NOT COMPILED (no Flutter SDK in the build sandbox) |
+| Conversations survive a server wipe: the app keeps a copy on the phone and restores it to the server (`GET /backup`, `POST /restore`) | IMPLEMENTED; store logic TESTED, endpoints and app NOT VERIFIED here |
+| New chats know about earlier chats (index of titles always; excerpts when the user asks about them) | IMPLEMENTED AND TESTED (store level) |
 | Semantic (embedding) memory search | NOT IMPLEMENTED (keyword search only, Arabic "ال" aware) |
 | Document creation, file organisation, web research tools | NOT IMPLEMENTED |
 | Avatar animation/lip-sync upgrades | NOT IMPLEMENTED |
@@ -80,6 +82,6 @@ after `confirm`.
 ## Deploy
 
 1. Render: set the variables above, start command `uvicorn main:app --host 0.0.0.0 --port $PORT` inside `backend/`.
-2. Add a Render persistent disk and set `IDRICI_DB_PATH` to a path on it, otherwise memory is lost on redeploy.
+2. Render's disk is erased on every restart/deploy (and when a free service sleeps). The app now restores your data from the phone's copy, but for a server that keeps its own data add a Render persistent disk (paid) and set `IDRICI_DB_PATH` to a path on it, e.g. `/var/data/idrici.db`. The startup log prints `STORAGE: <path> holds N conversations`.
 3. GitHub: add secret `IDRICI_API_KEY`; the `Build Android` workflow builds the APK artifact.
 4. Run tests: `pip install -e .[dev] && python -m pytest`.
